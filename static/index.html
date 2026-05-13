@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QR Studio | WebGPU Matrix</title>
+    
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="lib/ui/tailwind.css">
+    <script src="lib/ui/lucide.min.js"></script>
+    
+    <style>
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+        
+        .drag-active { border-color: #3b82f6 !important; background-color: #eff6ff !important; }
+        
+        input[type="range"] { accent-color: #2563eb; cursor: pointer; }
+        input[type="color"] { 
+            -webkit-appearance: none; border: none; width: 28px; height: 28px; 
+            border-radius: 4px; cursor: pointer; padding: 0; background: none;
+        }
+        input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+        input[type="color"]::-webkit-color-swatch { border: 1px solid #cbd5e1; border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen font-sans text-slate-800 selection:bg-blue-200">
+
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-10">
+        <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+                <div class="bg-blue-600 p-2 rounded-lg text-white">
+                    <i data-lucide="cpu"></i>
+                </div>
+                <h1 class="text-xl font-bold tracking-tight text-slate-900">QR Studio <span class="text-xs text-blue-600 align-top">WASM/WGSL</span></h1>
+            </div>
+            <div id="status" class="text-sm font-mono text-slate-500 font-medium">Booting Architecture...</div>
+        </div>
+    </header>
+
+    <main class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <div id="error-alert" class="hidden mb-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-start gap-3 shadow-sm">
+            <i data-lucide="alert-circle" class="w-5 h-5 flex-shrink-0 mt-0.5"></i>
+            <div>
+                <h3 class="font-semibold text-sm">Transpilation Failure</h3>
+                <p class="text-sm mt-1" id="error-message">Optical ingestion or matrix generation failed.</p>
+            </div>
+            <button onclick="document.getElementById('error-alert').classList.add('hidden')" class="ml-auto text-red-400 hover:text-red-600">
+                <i data-lucide="x" class="w-4 h-4"></i>
+            </button>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            
+            <div class="space-y-6">
+                <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
+                    <h2 class="text-lg font-semibold flex items-center gap-2 mb-4">
+                        <span class="bg-slate-100 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold">1</span>
+                        Optical Ingestion
+                    </h2>
+                    
+                    <div id="drop-zone" class="border-2 border-dashed border-slate-300 rounded-xl p-8 text-center transition-colors hover:bg-slate-50 cursor-pointer relative overflow-hidden group">
+                        <input type="file" id="file-input" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10" accept="image/*">
+                        
+                        <div id="upload-prompt" class="space-y-4">
+                            <div class="mx-auto w-16 h-16 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center group-hover:scale-110 transition-transform">
+                                <i data-lucide="scan-line" class="w-8 h-8"></i>
+                            </div>
+                            <div>
+                                <p class="font-medium text-slate-700">Scan existing QR Code</p>
+                                <p class="text-sm text-slate-500 mt-1">Drag & Drop or Click (PNG, JPG)</p>
+                            </div>
+                        </div>
+
+                        <div id="image-preview-container" class="hidden relative">
+                            <img id="image-preview" src="" alt="Uploaded QR Code" class="max-h-64 mx-auto rounded-lg shadow-sm">
+                            <div class="absolute inset-0 bg-white/50 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+                                <span class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg">Ingest New Payload</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="editor-card" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 opacity-50 pointer-events-none transition-opacity duration-300">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-lg font-semibold flex items-center gap-2">
+                            <span class="bg-slate-100 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold">2</span>
+                            Generative Data Payload
+                        </h2>
+                        <span id="payload-badge" class="hidden text-xs px-2 py-1 bg-blue-50 text-blue-600 border border-blue-200 rounded-md flex items-center gap-1 font-medium"></span>
+                    </div>
+                    <div class="relative">
+                        <textarea id="data-editor" rows="4" class="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-sm font-mono text-slate-800 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow resize-none" placeholder="Enter text to generate pristine matrix..."></textarea>
+                    </div>
+                </div>
+            </div>
+
+            <div class="space-y-6">
+                <div id="generator-card" class="bg-white rounded-2xl shadow-sm border border-slate-200 p-6 opacity-50 pointer-events-none transition-opacity duration-300">
+                    
+                    <h2 class="text-lg font-semibold flex items-center gap-2 mb-4">
+                        <span class="bg-slate-100 text-slate-600 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold">3</span>
+                        WebGPU Spatial Render
+                    </h2>
+
+                    <div class="flex flex-col gap-6 items-center sm:items-start">
+                        
+                        <div class="flex-shrink-0 bg-slate-50 rounded-xl border border-slate-100 shadow-inner w-full flex items-center justify-center aspect-square max-h-96 relative overflow-hidden">
+                            <canvas id="gpuCanvas" width="1024" height="1024" class="hidden w-full h-full object-contain absolute inset-0"></canvas>
+                            <img id="logoOverlay" data-active="false" src="" class="hidden absolute inset-0 m-auto z-10 object-contain pointer-events-none transition-all duration-200">
+                            
+                            <div id="output-placeholder" class="w-full h-full flex flex-col items-center justify-center text-slate-400 absolute inset-0">
+                                <i data-lucide="boxes" class="w-12 h-12 opacity-50 mb-2"></i>
+                                <span class="text-xs font-mono">Awaiting Matrix Payload</span>
+                            </div>
+                        </div>
+
+                        <div class="w-full space-y-4">
+                            <div id="contrast-warning" class="hidden bg-amber-50 border border-amber-200 text-amber-700 px-3 py-2 rounded-lg text-xs font-medium flex items-center gap-2">
+                                <i data-lucide="alert-triangle" class="w-4 h-4"></i>
+                                <span>Low Optical Contrast: Scanning may fail on physical devices.</span>
+                            </div>
+
+                            <div class="bg-slate-50 border border-slate-100 rounded-xl p-5 space-y-5">
+                                
+                                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 border-b border-slate-200 pb-2">
+                                    <i data-lucide="layers" class="w-4 h-4"></i> Payload Domain
+                                </h3>
+                                
+                                <div class="grid grid-cols-2 gap-6">
+                                    <div>
+                                        <div class="flex justify-between text-xs font-medium text-slate-600 mb-1">
+                                            <label class="flex items-center gap-1.5">Morphology</label>
+                                            <span id="valMorphPayload" class="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">2.00</span>
+                                        </div>
+                                        <input type="range" id="paramMorphPayload" class="w-full" min="0.2" max="5.0" step="0.01" value="2.0">
+                                    </div>
+                                    <div>
+                                        <div class="flex justify-between text-xs font-medium text-slate-600 mb-1">
+                                            <label class="flex items-center gap-1.5">Module Scale</label>
+                                            <span id="valScalePayload" class="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">0.90</span>
+                                        </div>
+                                        <input type="range" id="paramScalePayload" class="w-full" min="0.2" max="1.1" step="0.01" value="0.90">
+                                    </div>
+                                    <div>
+                                        <div class="flex justify-between text-xs font-medium text-slate-600 mb-1">
+                                            <label class="flex items-center gap-1.5">Fluidity (Blend)</label>
+                                            <span id="valBlendPayload" class="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">0.50</span>
+                                        </div>
+                                        <input type="range" id="paramBlendPayload" class="w-full" min="0.0" max="1.5" step="0.01" value="0.5">
+                                    </div>
+                                    <div class="flex flex-col justify-end pb-1">
+                                        <div class="flex items-center gap-2">
+                                            <input type="color" id="paramColorPayload" value="#000000">
+                                            <select id="paramThemePayload" class="bg-white border border-slate-200 text-slate-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full p-1 cursor-pointer">
+                                                <option value="0">Solid</option>
+                                                <option value="1">Camouflage</option>
+                                                <option value="2">Holographic</option>
+                                                <option value="3">Liquid Metal</option>
+                                                <option value="4">Fade Gradient</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 border-b border-slate-200 pb-2 mt-2">
+                                    <i data-lucide="scan" class="w-4 h-4"></i> Anchor Domain
+                                </h3>
+
+                                <div class="grid grid-cols-2 gap-6">
+                                    <div>
+                                        <div class="flex justify-between text-xs font-medium text-slate-600 mb-1">
+                                            <label class="flex items-center gap-1.5">Morphology</label>
+                                            <span id="valMorphAnchor" class="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">2.00</span>
+                                        </div>
+                                        <input type="range" id="paramMorphAnchor" class="w-full" min="0.2" max="10.0" step="0.01" value="2.0">
+                                    </div>
+                                    <div class="flex flex-col justify-end pb-1">
+                                        <div class="flex items-center gap-2">
+                                            <input type="color" id="paramColorAnchor" value="#000000">
+                                            <select id="paramThemeAnchor" class="bg-white border border-slate-200 text-slate-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full p-1 cursor-pointer">
+                                                <option value="0">Solid</option>
+                                                <option value="1">Camouflage</option>
+                                                <option value="2">Holographic</option>
+                                                <option value="3">Liquid Metal</option>
+                                                <option value="4">Fade Gradient</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <h3 class="text-xs font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2 border-b border-slate-200 pb-2 mt-2">
+                                    <i data-lucide="circle-dashed" class="w-4 h-4"></i> Layout & Compositing
+                                </h3>
+
+                                <div class="grid grid-cols-2 gap-6">
+                                    <div>
+                                        <div class="flex justify-between text-xs font-medium text-slate-600 mb-1">
+                                            <label class="flex items-center gap-1.5">Center Void (Mask)</label>
+                                            <span id="valMask" class="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">0.00</span>
+                                        </div>
+                                        <input type="range" id="paramMask" class="w-full" min="0.0" max="0.25" step="0.01" value="0.0">
+                                    </div>
+                                    <div>
+                                        <div class="flex justify-between text-xs font-medium text-slate-600 mb-1">
+                                            <label class="flex items-center gap-1.5">Logo Scale</label>
+                                            <span id="valLogoScale" class="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">0.00</span>
+                                        </div>
+                                        <input type="range" id="paramLogoScale" class="w-full" min="0.0" max="0.27" step="0.01" value="0.0">
+                                    </div>
+                                    <div>
+                                        <div class="flex justify-between text-xs font-medium text-slate-600 mb-1">
+                                            <label class="flex items-center gap-1.5">Quiet Zone (Padding)</label>
+                                            <span id="valQuietZone" class="font-mono text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100">2.00</span>
+                                        </div>
+                                        <input type="range" id="paramQuietZone" class="w-full" min="0.0" max="6.0" step="0.01" value="2.0">
+                                    </div>
+                                    <div class="flex flex-col justify-end pb-1">
+                                        <div class="flex items-center gap-3">
+                                            <input type="color" id="paramColorBg" value="#ffffff">
+                                            <span class="text-xs font-medium text-slate-600">Background Color</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                <div class="flex justify-end gap-2 mt-2 pt-2 border-t border-slate-100">
+                                    <button id="remove-logo-btn" class="hidden text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1 border border-red-100">
+                                        <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                    </button>
+                                    <input type="file" id="logo-input" accept="image/*" class="hidden">
+                                    <button onclick="document.getElementById('logo-input').click()" class="text-xs font-medium text-slate-700 bg-slate-200 hover:bg-slate-300 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">
+                                        <i data-lucide="image-plus" class="w-3.5 h-3.5"></i> Brand Logo
+                                    </button>
+                                </div>
+
+                            </div>
+
+                            <button id="download-btn" class="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-xl transition-all shadow-sm shadow-blue-200 mt-2 disabled:opacity-50 disabled:cursor-not-allowed">
+                                <i data-lucide="download" class="w-4 h-4"></i>
+                                Export Lossless 4K Composite
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <canvas id="ingestionCanvas" class="hidden"></canvas>
+    <script src="app.js"></script>
+</body>
+</html>
