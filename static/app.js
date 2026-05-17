@@ -1,7 +1,3 @@
-// ============================================================================
-// APPLIED SCIENCE: DETERMINISTIC SYSTEM ARCHITECTURE
-// ============================================================================
-
 const SAFE_CAPACITY_H = [
     0, 7, 14, 26, 36, 46, 60, 66, 86, 100, 122, 140, 158, 180, 197, 220, 250, 
     280, 310, 338, 382, 403, 439, 461, 511, 535, 593, 625, 658, 698, 742, 790, 
@@ -46,7 +42,7 @@ class WasmKernel {
         
         this.#exports._initialize();
         this.#ctxPtr = this.#exports.create_context();
-        if (!this.#ctxPtr) throw new Error("WASM Memory Allocation Failure: Context Opaque Pointer Null.");
+        if (!this.#ctxPtr) throw new Error("WASM Allocation Failure");
     }
 
     destroy() {
@@ -161,7 +157,7 @@ class GpuRenderer {
 
     async initialize(canvas) {
         const adapter = await navigator.gpu?.requestAdapter();
-        if (!adapter) throw new Error("WebGPU Architecture Unsupported.");
+        if (!adapter) throw new Error("WebGPU Architecture Unsupported");
         
         this.#device = await adapter.requestDevice();
         this.#context = canvas.getContext('webgpu');
@@ -188,7 +184,6 @@ class GpuRenderer {
         this.#buffers.uniform = this.#device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     }
 
-    // SUPREMACY ARCHITECTURE: Native Swapchain Rescaling Method
     configureContext(w, h) {
         if (!this.#context || !this.#device) return;
         this.#context.canvas.width = w;
@@ -282,7 +277,6 @@ class GpuRenderer {
         this.#device.queue.submit([encoder.finish()]);
     }
 
-    // SUPREMACY ARCHITECTURE: Absolute VRAM Extraction via Mapping
     async exportToCanvas(config, targetRes) {
         if (!this.#buffers.payload || !this.#buffers.align) return null;
         this.#ensureBindGroup();
@@ -336,7 +330,7 @@ class GpuRenderer {
         const outCanvas = document.createElement('canvas');
         outCanvas.width = targetRes;
         outCanvas.height = targetRes;
-        const ctx = outCanvas.getContext('2d');
+        const ctx = outCanvas.getContext('2d', { alpha: false, willReadFrequently: false });
         const imgData = ctx.createImageData(targetRes, targetRes);
         
         const isBGRA = format.includes('bgra');
@@ -387,7 +381,8 @@ class UiController {
             version: 1,
             eccTier: 1,
             alignCount: 0,
-            renderScheduled: false
+            renderScheduled: false,
+            visualSize: 0
         };
 
         this.#timers = { text: null, layout: null };
@@ -433,9 +428,24 @@ class UiController {
             logoOverlay: document.getElementById('logoOverlay'),
             removeLogoBtn: document.getElementById('remove-logo-btn')
         };
+
+        this.#dom.logoOverlay.classList.remove('transition-all', 'duration-200');
+        this.#dom.logoOverlay.style.transition = 'none';
+        this.#dom.logoOverlay.style.willChange = 'transform';
     }
 
     #attachListeners() {
+        const ro = new ResizeObserver(entries => {
+            for (let entry of entries) {
+                const rect = entry.contentRect;
+                this.#state.visualSize = Math.min(rect.width, rect.height);
+                this.#dom.logoOverlay.style.width = `${this.#state.visualSize}px`;
+                this.#dom.logoOverlay.style.height = `${this.#state.visualSize}px`;
+                this.#updateLogoScaleTransformation();
+            }
+        });
+        ro.observe(this.#dom.gpuCanvas.parentElement);
+
         this.#dom.dataEditor.addEventListener('input', (e) => {
             clearTimeout(this.#timers.text);
             this.#timers.text = setTimeout(() => this.#processTextIngestion(e.target.value), 250);
@@ -445,7 +455,6 @@ class UiController {
             document.getElementById(`val${param.charAt(0).toUpperCase() + param.slice(1)}`).textContent = value.toFixed(2);
         };
 
-        // SUPREMACY FIX: Removed Destructive State Coupling between Mask (Void) and Logo Overlay.
         this.#dom.mask.addEventListener('input', (e) => {
             syncLayoutParams('mask', parseFloat(e.target.value));
             this.#requestRender();
@@ -455,6 +464,7 @@ class UiController {
         this.#dom.logoScale.addEventListener('input', (e) => {
             syncLayoutParams('logoScale', parseFloat(e.target.value));
             this.#updateLogoScaleTransformation();
+            this.#requestRender();
             this.#debounceEccValidation();
         });
 
@@ -488,9 +498,9 @@ class UiController {
             if (parseFloat(this.#dom.logoScale.value) === 0.0) {
                 this.#dom.logoScale.value = 0.15;
                 syncLayoutParams('logoScale', 0.15);
-                this.#debounceEccValidation();
             }
             this.#updateLogoScaleTransformation();
+            this.#debounceEccValidation();
         });
 
         this.#dom.removeLogoBtn.addEventListener('click', () => {
@@ -499,9 +509,9 @@ class UiController {
             this.#dom.logoOverlay.removeAttribute('data-active');
             this.#dom.logoInput.value = "";
             
-            this.#debounceEccValidation();
             this.#updateLogoScaleTransformation();
             this.#requestRender();
+            this.#debounceEccValidation();
         });
 
         this.#dom.fileInput.addEventListener('change', (e) => {
@@ -552,7 +562,7 @@ class UiController {
         
         if (damageRadius <= 0.0) return 1; 
         
-        const damagePercentage = Math.PI * Math.pow(damageRadius, 2) * 100;
+        const damagePercentage = Math.PI * Math.pow(damageRadius, 2) * 100.0;
         const requiredRecovery = damagePercentage + 6.0;
 
         if (requiredRecovery <= 7.0) return 0;
@@ -574,16 +584,14 @@ class UiController {
     #updateLogoScaleTransformation() {
         if (!this.#state.dimension) return;
         
-        const padding = parseFloat(this.#dom.quietZone.value) * 2;
+        const padding = parseFloat(this.#dom.quietZone.value) * 2.0;
         const logoScale = parseFloat(this.#dom.logoScale.value);
-        const fraction = (logoScale * 2 * this.#state.dimension) / (this.#state.dimension + padding);
-        const pct = Math.max(0, fraction * 100);
+        const fraction = (logoScale * 2.0 * this.#state.dimension) / (this.#state.dimension + padding);
         
-        this.#dom.logoOverlay.style.width = `${pct}%`;
-        this.#dom.logoOverlay.style.height = `${pct}%`;
+        this.#dom.logoOverlay.style.transform = `scale(${fraction})`;
         
         const isActive = this.#dom.logoOverlay.getAttribute('data-active') === 'true';
-        if (pct > 0 && isActive) {
+        if (fraction > 0 && isActive) {
             this.#dom.logoOverlay.classList.remove('hidden');
             this.#dom.removeLogoBtn.classList.remove('hidden');
         } else {
@@ -634,7 +642,7 @@ class UiController {
 
     #processTextIngestion(text, targetEcc = -1) {
         if (!text.trim()) {
-            this.#dom.status.textContent = "System Ready. Awaiting Data.";
+            this.#dom.status.textContent = "System Ready";
             this.#dom.payloadBadge.classList.add('hidden');
             return;
         }
@@ -728,29 +736,47 @@ class UiController {
             const TARGET_RES = 3840;
             
             const baseCanvas = await this.#renderer.exportToCanvas(this.#getCurrentConfig(), TARGET_RES);
-            if (!baseCanvas) throw new Error("VRAM Mapping Pipeline Failed.");
+            if (!baseCanvas) throw new Error("VRAM Mapping Pipeline Failed");
 
             const ctx2d = baseCanvas.getContext('2d');
 
             if (this.#dom.logoOverlay.getAttribute('data-active') === 'true' && this.#blobRegistry.logo) {
                 const img = new Image();
-                img.src = this.#blobRegistry.logo;
-                await new Promise(r => img.onload = r);
                 
-                const padding = parseFloat(this.#dom.quietZone.value) * 2;
+                await new Promise((resolve, reject) => {
+                    img.onload = resolve;
+                    img.onerror = () => reject(new Error("Failed to load logo payload."));
+                    img.src = this.#blobRegistry.logo;
+                });
+                
+                const padding = parseFloat(this.#dom.quietZone.value) * 2.0;
                 const logoScaleVal = parseFloat(this.#dom.logoScale.value);
-                const logoSize = ((logoScaleVal * 2 * this.#state.dimension) / (this.#state.dimension + padding)) * TARGET_RES;
+                const domainFraction = (logoScaleVal * 2.0 * this.#state.dimension) / (this.#state.dimension + padding);
+                const logoBoxSize = domainFraction * TARGET_RES;
                 
                 ctx2d.save();
-                ctx2d.beginPath();
-                ctx2d.arc(TARGET_RES/2, TARGET_RES/2, logoSize / 2, 0, Math.PI * 2);
-                ctx2d.clip();
+                ctx2d.imageSmoothingEnabled = true;
+                ctx2d.imageSmoothingQuality = 'high';
                 
-                const imgRatio = img.width / img.height;
-                let drawW = logoSize, drawH = logoSize;
-                imgRatio > 1 ? drawH = logoSize / imgRatio : drawW = logoSize * imgRatio;
+                const intrinsicWidth = img.naturalWidth || img.width || 300.0;
+                const intrinsicHeight = img.naturalHeight || img.height || 300.0;
+                const imgRatio = intrinsicWidth / intrinsicHeight;
                 
-                ctx2d.drawImage(img, TARGET_RES/2 - drawW/2, TARGET_RES/2 - drawH/2, drawW, drawH);
+                let drawW = logoBoxSize;
+                let drawH = logoBoxSize;
+                
+                if (imgRatio > 1.0) {
+                    drawH = logoBoxSize / imgRatio;
+                } else if (imgRatio < 1.0) {
+                    drawW = logoBoxSize * imgRatio;
+                }
+
+                const dx = Math.round((TARGET_RES - drawW) / 2.0);
+                const dy = Math.round((TARGET_RES - drawH) / 2.0);
+                drawW = Math.round(drawW);
+                drawH = Math.round(drawH);
+                
+                ctx2d.drawImage(img, dx, dy, drawW, drawH);
                 ctx2d.restore();
             }
 
@@ -771,13 +797,10 @@ class UiController {
 
     startup() {
         this.#dom.editorCard.classList.remove('opacity-50', 'pointer-events-none');
-        this.#dom.status.textContent = "System Ready. Awaiting Data.";
+        this.#dom.status.textContent = "System Ready";
     }
 }
 
-// ============================================================================
-// SYSTEM BOOTSTRAP
-// ============================================================================
 (async function() {
     const kernel = new WasmKernel();
     const renderer = new GpuRenderer();
