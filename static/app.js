@@ -9,20 +9,23 @@ class ColorScience {
         return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
     }
 
-    static hexToLinearRgb(hex) {
-        const r = parseInt(hex.slice(1, 3), 16) / 255.0;
-        const g = parseInt(hex.slice(3, 5), 16) / 255.0;
-        const b = parseInt(hex.slice(5, 7), 16) / 255.0;
-        return [this.srgbToLinear(r), this.srgbToLinear(g), this.srgbToLinear(b)];
-    }
-
-    static getLuminance(r, g, b) {
-        return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    static writeHexToLinearRgb(hex, view, offset) {
+        const num = parseInt(hex.substring(1), 16);
+        view[offset] = this.srgbToLinear(((num >> 16) & 255) / 255.0);
+        view[offset + 1] = this.srgbToLinear(((num >> 8) & 255) / 255.0);
+        view[offset + 2] = this.srgbToLinear((num & 255) / 255.0);
     }
 
     static calculateContrastRatio(hex1, hex2) {
-        const l1 = this.getLuminance(...this.hexToLinearRgb(hex1));
-        const l2 = this.getLuminance(...this.hexToLinearRgb(hex2));
+        const getLuminance = (h) => {
+            const n = parseInt(h.substring(1), 16);
+            const r = this.srgbToLinear(((n >> 16) & 255) / 255.0);
+            const g = this.srgbToLinear(((n >> 8) & 255) / 255.0);
+            const b = this.srgbToLinear((n & 255) / 255.0);
+            return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        };
+        const l1 = getLuminance(hex1);
+        const l2 = getLuminance(hex2);
         return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
     }
 }
@@ -31,6 +34,22 @@ class WasmKernel {
     #module;
     #exports;
     #ctxPtr;
+    #encoder;
+    #decoder;
+    
+    #pool = {
+        text: { ptr: 0, size: 0 },
+        img: { ptr: 0, size: 0 }
+    };
+
+    // Pre-allocated semantic matrix prevents JS TypedArray GC thrashing
+    #semanticBuffer;
+
+    constructor() {
+        this.#encoder = new TextEncoder();
+        this.#decoder = new TextDecoder();
+        this.#semanticBuffer = new Uint32Array(177 * 177); // Maximum V40 capacity
+    }
 
     async initialize() {
         const wasiSinkhole = new Proxy({}, { get: () => () => 0 });
@@ -42,7 +61,18 @@ class WasmKernel {
         
         this.#exports._initialize();
         this.#ctxPtr = this.#exports.create_context();
-        if (!this.#ctxPtr) throw new Error("WASM Allocation Failure");
+        if (!this.#ctxPtr) throw new Error("WASM Context Allocation Failure");
+    }
+
+    #getPtr(id, reqSize) {
+        if (this.#pool[id].size < reqSize) {
+            if (this.#pool[id].ptr) this.#exports.free_buffer(this.#pool[id].ptr);
+            const newSize = Math.max(reqSize, this.#pool[id].size * 2, 4096);
+            const ptr = this.#exports.allocate_buffer(newSize);
+            if (ptr === 0) throw new Error("CRITICAL: WASM Memory Heap Exhaustion");
+            this.#pool[id] = { ptr, size: newSize };
+        }
+        return this.#pool[id].ptr;
     }
 
     destroy() {
@@ -53,45 +83,41 @@ class WasmKernel {
     }
 
     generateFromText(text, eccTier) {
-        const bytes = new TextEncoder().encode(text);
-        const ptr = this.#exports.allocate_buffer(bytes.length);
+        const bytes = this.#encoder.encode(text);
+        const ptr = this.#getPtr('text', bytes.length);
         new Uint8Array(this.#exports.memory.buffer, ptr, bytes.length).set(bytes);
         
         const code = this.#exports.generate_qr_dynamic(this.#ctxPtr, ptr, bytes.length, eccTier);
-        this.#exports.free_buffer(ptr);
-        
         if (code !== 1) return null;
         return this.#extractState();
     }
 
     transpileImage(imgData, w, h) {
-        const ptr = this.#exports.allocate_buffer(imgData.data.length);
-        new Uint8Array(this.#exports.memory.buffer, ptr, imgData.data.length).set(imgData.data);
+        const size = imgData.data.length;
+        const ptr = this.#getPtr('img', size);
+        new Uint8Array(this.#exports.memory.buffer, ptr, size).set(imgData.data);
         
         const code = this.#exports.transpile_qr(this.#ctxPtr, ptr, w, h);
-        this.#exports.free_buffer(ptr);
-        
         if (code !== 1) return null;
         
         const textPtr = this.#exports.get_decoded_text_ptr(this.#ctxPtr);
         const textLen = this.#exports.get_decoded_text_len(this.#ctxPtr);
-        const decodedText = new TextDecoder().decode(new Uint8Array(this.#exports.memory.buffer, textPtr, textLen));
+        const decodedText = this.#decoder.decode(new Uint8Array(this.#exports.memory.buffer, textPtr, textLen));
         
         return { text: decodedText, ...this.#extractState() };
     }
 
     validateImage(imgData, w, h) {
-        const ptr = this.#exports.allocate_buffer(imgData.data.length);
-        new Uint8Array(this.#exports.memory.buffer, ptr, imgData.data.length).set(imgData.data);
+        const size = imgData.data.length;
+        const ptr = this.#getPtr('img', size);
+        new Uint8Array(this.#exports.memory.buffer, ptr, size).set(imgData.data);
         
         const code = this.#exports.validate_qr(this.#ctxPtr, ptr, w, h);
-        this.#exports.free_buffer(ptr);
-        
         if (code !== 1) return null;
         
         const textPtr = this.#exports.get_decoded_text_ptr(this.#ctxPtr);
         const textLen = this.#exports.get_decoded_text_len(this.#ctxPtr);
-        return new TextDecoder().decode(new Uint8Array(this.#exports.memory.buffer, textPtr, textLen));
+        return this.#decoder.decode(new Uint8Array(this.#exports.memory.buffer, textPtr, textLen));
     }
 
     #extractState() {
@@ -129,30 +155,60 @@ class WasmKernel {
     }
 
     #computeSemanticGrid(raw8, dim) {
-        const payload32 = new Uint32Array(dim * dim);
+        const payload32 = this.#semanticBuffer;
         const version = (dim - 21) / 4 + 1;
         const alignCenters = this.#computeAlignmentCenters(dim);
 
-        const isFinder = (x, y) => (x < 8 && y < 8) || (x >= dim - 8 && y < 8) || (x < 8 && y >= dim - 8);
-        const isAlignment = (x, y) => alignCenters.some(c => Math.abs(x - c.x) <= 2 && Math.abs(y - c.y) <= 2);
-        const isTiming = (x, y) => (x === 6 && y >= 8 && y < dim - 8) || (y === 6 && x >= 8 && x < dim - 8);
-        const isFormat = (x, y) => (y === 8 && ((x >= 0 && x <= 8) || (x >= dim - 8 && x < dim))) || (x === 8 && ((y >= 0 && y <= 8) || (y >= dim - 7 && y < dim)));
-        const isVersion = (x, y) => version >= 7 && ((x >= dim - 11 && x <= dim - 9 && y >= 0 && y <= 5) || (x >= 0 && x <= 5 && y >= dim - 11 && y <= dim - 9));
+        // Map into persistent buffer to bypass TypedArray allocations
+        for (let i = 0; i < dim * dim; i++) {
+            payload32[i] = raw8[i];
+        }
 
-        for (let y = 0; y < dim; y++) {
-            for (let x = 0; x < dim; x++) {
-                const idx = y * dim + x;
-                const val = raw8[idx];
+        for (let y = 0; y < 8; y++) {
+            for (let x = 0; x < 8; x++) {
+                payload32[y * dim + x] = 0;                   
+                payload32[y * dim + (dim - 8 + x)] = 0;       
+                payload32[(dim - 8 + y) * dim + x] = 0;       
+            }
+        }
 
-                if (isFinder(x, y) || isAlignment(x, y)) {
-                    payload32[idx] = 0; 
-                } else if (isTiming(x, y) || isFormat(x, y) || isVersion(x, y)) {
-                    payload32[idx] = val === 1 ? 2 : 0; 
-                } else {
-                    payload32[idx] = val === 1 ? 1 : 0; 
+        for (const c of alignCenters) {
+            for (let dy = -2; dy <= 2; dy++) {
+                for (let dx = -2; dx <= 2; dx++) {
+                    payload32[(c.y + dy) * dim + (c.x + dx)] = 0;
                 }
             }
         }
+
+        for (let i = 8; i < dim - 8; i++) {
+            payload32[6 * dim + i] = raw8[6 * dim + i] === 1 ? 2 : 0; 
+            payload32[i * dim + 6] = raw8[i * dim + 6] === 1 ? 2 : 0; 
+        }
+
+        for (let i = 0; i <= 8; i++) {
+            payload32[8 * dim + i] = raw8[8 * dim + i] === 1 ? 2 : 0;
+            payload32[i * dim + 8] = raw8[i * dim + 8] === 1 ? 2 : 0;
+        }
+        for (let i = dim - 8; i < dim; i++) {
+            payload32[8 * dim + i] = raw8[8 * dim + i] === 1 ? 2 : 0;
+        }
+        for (let i = dim - 7; i < dim; i++) {
+            payload32[i * dim + 8] = raw8[i * dim + 8] === 1 ? 2 : 0;
+        }
+
+        if (version >= 7) {
+            for (let y = 0; y <= 5; y++) {
+                for (let x = dim - 11; x <= dim - 9; x++) {
+                    payload32[y * dim + x] = raw8[y * dim + x] === 1 ? 2 : 0; 
+                }
+            }
+            for (let y = dim - 11; y <= dim - 9; y++) {
+                for (let x = 0; x <= 5; x++) {
+                    payload32[y * dim + x] = raw8[y * dim + x] === 1 ? 2 : 0; 
+                }
+            }
+        }
+
         return payload32;
     }
 }
@@ -162,12 +218,37 @@ class GpuRenderer {
     #context;
     #renderPipeline;
     
-    #buffers = {
-        uniform: null,
-        payload: null,
-        align: null
-    };
+    #buffers = { uniform: null, payload: null, align: null };
     #bindGroup = null;
+
+    #uniformData;
+    #uniformU32;
+    #uniformF32;
+
+    // Twin-Canvas Architecture: Isolates Context Extrusions
+    #valCanvas;
+    #valCtx;
+
+    // Validation Cache
+    #valTexture;
+    #valReadBuffer;
+    #valBytesPerRow;
+    #valImageData;
+
+    constructor() {
+        this.#uniformData = new ArrayBuffer(80);
+        this.#uniformU32 = new Uint32Array(this.#uniformData);
+        this.#uniformF32 = new Float32Array(this.#uniformData);
+
+        // Immutable context for non-blocking Read-After-Write loops
+        this.#valCanvas = ('OffscreenCanvas' in window) 
+            ? new OffscreenCanvas(1024, 1024) 
+            : document.createElement('canvas');
+        this.#valCanvas.width = 1024;
+        this.#valCanvas.height = 1024;
+        this.#valCtx = this.#valCanvas.getContext('2d', { alpha: false, willReadFrequently: true });
+        this.#valImageData = new ImageData(1024, 1024);
+    }
 
     async initialize(canvas) {
         const adapter = await navigator.gpu?.requestAdapter();
@@ -195,7 +276,18 @@ class GpuRenderer {
             primitive: { topology: 'triangle-list' }
         });
         
+        this.#buffers.payload = this.#device.createBuffer({ size: 262144, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+        this.#buffers.align = this.#device.createBuffer({ size: 4096, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         this.#buffers.uniform = this.#device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+        this.#bindGroup = this.#device.createBindGroup({
+            layout: this.#renderPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.#buffers.payload } },
+                { binding: 1, resource: { buffer: this.#buffers.uniform } },
+                { binding: 2, resource: { buffer: this.#buffers.align } }
+            ]
+        });
     }
 
     configureContext(w, h) {
@@ -209,77 +301,46 @@ class GpuRenderer {
         });
     }
 
-    bindMatrixData(semanticPayload, alignmentCenters) {
-        if (this.#buffers.payload) this.#buffers.payload.destroy();
-        this.#buffers.payload = this.#device.createBuffer({ size: semanticPayload.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-        this.#device.queue.writeBuffer(this.#buffers.payload, 0, semanticPayload);
+    bindMatrixData(semanticPayload, dim, alignmentCenters) {
+        // Precise byte-length streaming to avert redundant VRAM bandwidth usage
+        this.#device.queue.writeBuffer(this.#buffers.payload, 0, semanticPayload.buffer, 0, dim * dim * 4);
 
         const alignData = new Float32Array(Math.max(2, alignmentCenters.length * 2));
         alignmentCenters.forEach((c, i) => { alignData[i*2] = c.x; alignData[i*2+1] = c.y; });
-        
-        if (this.#buffers.align) this.#buffers.align.destroy();
-        this.#buffers.align = this.#device.createBuffer({ size: alignData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         this.#device.queue.writeBuffer(this.#buffers.align, 0, alignData);
-
-        this.#bindGroup = null; 
-    }
-
-    #ensureBindGroup() {
-        if (!this.#bindGroup) {
-            this.#bindGroup = this.#device.createBindGroup({
-                layout: this.#renderPipeline.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: this.#buffers.payload } },
-                    { binding: 1, resource: { buffer: this.#buffers.uniform } },
-                    { binding: 2, resource: { buffer: this.#buffers.align } }
-                ]
-            });
-        }
     }
 
     #updateUniforms(config) {
-        const paramData = new ArrayBuffer(80);
-        const paramU32 = new Uint32Array(paramData);
-        const paramF32 = new Float32Array(paramData);
-        
-        paramU32[0] = config.dimension;
-        paramF32[1] = config.morphPayload;
-        paramF32[2] = config.blendPayload;
-        paramF32[3] = config.maskRadius;
-        paramF32[4] = config.morphAnchor;
-        paramU32[5] = config.alignCount;
-        paramF32[6] = config.payloadScale;
-        paramF32[7] = config.quietZone;
+        this.#uniformU32[0] = config.dimension;
+        this.#uniformF32[1] = config.morphPayload;
+        this.#uniformF32[2] = config.blendPayload;
+        this.#uniformF32[3] = config.maskRadius;
+        this.#uniformF32[4] = config.morphAnchor;
+        this.#uniformU32[5] = config.alignCount;
+        this.#uniformF32[6] = config.payloadScale;
+        this.#uniformF32[7] = config.quietZone;
 
-        const rgbP = ColorScience.hexToLinearRgb(config.colorPayload);
-        const rgbA = ColorScience.hexToLinearRgb(config.colorAnchor);
-        const rgbB = ColorScience.hexToLinearRgb(config.colorBg);
-        
-        paramF32[8] = rgbP[0]; paramF32[9] = rgbP[1]; paramF32[10] = rgbP[2];
-        paramU32[11] = config.themePayload;
+        ColorScience.writeHexToLinearRgb(config.colorPayload, this.#uniformF32, 8);
+        this.#uniformU32[11] = config.themePayload;
 
-        paramF32[12] = rgbA[0]; paramF32[13] = rgbA[1]; paramF32[14] = rgbA[2];
-        paramU32[15] = config.themeAnchor;
+        ColorScience.writeHexToLinearRgb(config.colorAnchor, this.#uniformF32, 12);
+        this.#uniformU32[15] = config.themeAnchor;
 
-        paramF32[16] = rgbB[0]; paramF32[17] = rgbB[1]; paramF32[18] = rgbB[2];
+        ColorScience.writeHexToLinearRgb(config.colorBg, this.#uniformF32, 16);
 
-        this.#device.queue.writeBuffer(this.#buffers.uniform, 0, paramData);
+        this.#device.queue.writeBuffer(this.#buffers.uniform, 0, this.#uniformData);
     }
 
     async render(config) {
-        if (!this.#buffers.payload || !this.#buffers.align) return;
-        this.#ensureBindGroup();
+        if (!this.#bindGroup) return;
         this.#updateUniforms(config);
 
         const encoder = this.#device.createCommandEncoder();
-        const view = this.#context.getCurrentTexture().createView();
-        
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
-                view: view,
+                view: this.#context.getCurrentTexture().createView(),
                 clearValue: { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
-                loadOp: 'clear', 
-                storeOp: 'store',
+                loadOp: 'clear', storeOp: 'store',
             }]
         });
 
@@ -292,17 +353,42 @@ class GpuRenderer {
     }
 
     async #extractRaster(config, targetRes) {
-        if (!this.#buffers.payload || !this.#buffers.align) return null;
-        this.#ensureBindGroup();
+        if (!this.#bindGroup) return null;
         this.#updateUniforms(config);
 
         const format = navigator.gpu.getPreferredCanvasFormat();
-        
-        const texture = this.#device.createTexture({
-            size: { width: targetRes, height: targetRes },
-            format: format,
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
-        });
+        let texture, readBuffer, bytesPerRow, imgData;
+
+        if (targetRes === 1024) {
+            if (!this.#valTexture) {
+                this.#valTexture = this.#device.createTexture({
+                    size: { width: 1024, height: 1024 },
+                    format: format,
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+                });
+                this.#valBytesPerRow = Math.ceil((1024 * 4) / 256) * 256;
+                this.#valReadBuffer = this.#device.createBuffer({
+                    size: this.#valBytesPerRow * 1024,
+                    usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+                });
+            }
+            texture = this.#valTexture;
+            readBuffer = this.#valReadBuffer;
+            bytesPerRow = this.#valBytesPerRow;
+            imgData = this.#valImageData;
+        } else {
+            texture = this.#device.createTexture({
+                size: { width: targetRes, height: targetRes },
+                format: format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+            });
+            bytesPerRow = Math.ceil((targetRes * 4) / 256) * 256;
+            readBuffer = this.#device.createBuffer({
+                size: bytesPerRow * targetRes,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
+            });
+            imgData = new ImageData(targetRes, targetRes);
+        }
 
         const encoder = this.#device.createCommandEncoder();
         const pass = encoder.beginRenderPass({
@@ -318,19 +404,9 @@ class GpuRenderer {
         pass.draw(3, 1, 0, 0);
         pass.end();
 
-        const bytesPerPixel = 4;
-        const align = 256;
-        const paddedBytesPerRow = Math.ceil((targetRes * bytesPerPixel) / align) * align;
-        const bufferSize = paddedBytesPerRow * targetRes;
-
-        const readBuffer = this.#device.createBuffer({
-            size: bufferSize,
-            usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST
-        });
-
         encoder.copyTextureToBuffer(
             { texture },
-            { buffer: readBuffer, bytesPerRow: paddedBytesPerRow, rowsPerImage: targetRes },
+            { buffer: readBuffer, bytesPerRow: bytesPerRow, rowsPerImage: targetRes },
             { width: targetRes, height: targetRes }
         );
 
@@ -338,56 +414,85 @@ class GpuRenderer {
         await this.#device.queue.onSubmittedWorkDone();
         
         await readBuffer.mapAsync(GPUMapMode.READ);
-        const src = new Uint8Array(readBuffer.getMappedRange());
-        
-        const imgData = new ImageData(targetRes, targetRes);
-        const isBGRA = format.includes('bgra');
+        const src32 = new Uint32Array(readBuffer.getMappedRange());
+        const dest32 = new Uint32Array(imgData.data.buffer);
+        const pixelsPerRow = bytesPerRow / 4;
 
-        for (let y = 0; y < targetRes; y++) {
-            const srcRow = y * paddedBytesPerRow;
-            const destRow = y * targetRes * 4;
-            for (let x = 0; x < targetRes; x++) {
-                const sp = srcRow + x * 4;
-                const dp = destRow + x * 4;
-                if (isBGRA) {
-                    imgData.data[dp] = src[sp + 2];     
-                    imgData.data[dp + 1] = src[sp + 1]; 
-                    imgData.data[dp + 2] = src[sp];     
-                    imgData.data[dp + 3] = src[sp + 3]; 
-                } else {
-                    imgData.data[dp] = src[sp];
-                    imgData.data[dp + 1] = src[sp + 1];
-                    imgData.data[dp + 2] = src[sp + 2];
-                    imgData.data[dp + 3] = src[sp + 3];
+        if (format.includes('bgra')) {
+            for (let y = 0; y < targetRes; y++) {
+                let srcIdx = y * pixelsPerRow;
+                let destIdx = y * targetRes;
+                for (let x = 0; x < targetRes; x++) {
+                    const pixel = src32[srcIdx++];
+                    dest32[destIdx++] = (pixel & 0xff00ff00) | ((pixel & 0xff0000) >>> 16) | ((pixel & 0xff) << 16);
                 }
+            }
+        } else {
+            for (let y = 0; y < targetRes; y++) {
+                dest32.set(src32.subarray(y * pixelsPerRow, y * pixelsPerRow + targetRes), y * targetRes);
             }
         }
 
         readBuffer.unmap();
-        texture.destroy();
-        readBuffer.destroy();
+        
+        if (targetRes !== 1024) {
+            texture.destroy();
+            readBuffer.destroy();
+        }
 
         return imgData;
     }
 
-    async #renderCompositeCanvas(config, targetRes) {
+    async extractValidationRaster(config) {
+        const imgData = await this.#extractRaster(config, 1024);
+        if (!imgData) return null;
+
+        this.#valCtx.putImageData(imgData, 0, 0);
+
+        if (config.logoActive && config.logoBitmap) {
+            const bmp = config.logoBitmap;
+            const padding = config.quietZone * 2.0;
+            const domainFraction = (config.logoScaleVal * 2.0 * config.dimension) / (config.dimension + padding);
+            const logoBoxSize = domainFraction * 1024;
+
+            this.#valCtx.save();
+            this.#valCtx.imageSmoothingEnabled = true;
+            this.#valCtx.imageSmoothingQuality = 'high';
+
+            const imgRatio = bmp.width / bmp.height;
+            let drawW = logoBoxSize;
+            let drawH = logoBoxSize;
+
+            if (imgRatio > 1.0) drawH = logoBoxSize / imgRatio;
+            else if (imgRatio < 1.0) drawW = logoBoxSize * imgRatio;
+
+            drawW = Math.round(drawW);
+            drawH = Math.round(drawH);
+            const dx = Math.round((1024 - drawW) / 2.0);
+            const dy = Math.round((1024 - drawH) / 2.0);
+
+            this.#valCtx.drawImage(bmp, dx, dy, drawW, drawH);
+            this.#valCtx.restore();
+        }
+
+        return this.#valCtx.getImageData(0, 0, 1024, 1024);
+    }
+
+    async exportToCanvas(config, targetRes) {
         const imgData = await this.#extractRaster(config, targetRes);
         if (!imgData) return null;
 
-        const canvas = document.createElement('canvas');
+        const canvas = ('OffscreenCanvas' in window) 
+            ? new OffscreenCanvas(targetRes, targetRes) 
+            : document.createElement('canvas');
+            
         canvas.width = targetRes;
         canvas.height = targetRes;
         const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
         ctx.putImageData(imgData, 0, 0);
 
-        if (config.logoActive && config.logoBlob) {
-            const img = new Image();
-            await new Promise((resolve, reject) => {
-                img.onload = resolve;
-                img.onerror = () => reject(new Error("Failed to load logo payload."));
-                img.src = config.logoBlob;
-            });
-
+        if (config.logoActive && config.logoBitmap) {
+            const bmp = config.logoBitmap;
             const padding = config.quietZone * 2.0;
             const domainFraction = (config.logoScaleVal * 2.0 * config.dimension) / (config.dimension + padding);
             const logoBoxSize = domainFraction * targetRes;
@@ -396,39 +501,23 @@ class GpuRenderer {
             ctx.imageSmoothingEnabled = true;
             ctx.imageSmoothingQuality = 'high';
 
-            const intrinsicWidth = img.naturalWidth || img.width || 300.0;
-            const intrinsicHeight = img.naturalHeight || img.height || 300.0;
-            const imgRatio = intrinsicWidth / intrinsicHeight;
-
+            const imgRatio = bmp.width / bmp.height;
             let drawW = logoBoxSize;
             let drawH = logoBoxSize;
 
-            if (imgRatio > 1.0) {
-                drawH = logoBoxSize / imgRatio;
-            } else if (imgRatio < 1.0) {
-                drawW = logoBoxSize * imgRatio;
-            }
+            if (imgRatio > 1.0) drawH = logoBoxSize / imgRatio;
+            else if (imgRatio < 1.0) drawW = logoBoxSize * imgRatio;
 
             drawW = Math.round(drawW);
             drawH = Math.round(drawH);
             const dx = Math.round((targetRes - drawW) / 2.0);
             const dy = Math.round((targetRes - drawH) / 2.0);
 
-            ctx.drawImage(img, dx, dy, drawW, drawH);
+            ctx.drawImage(bmp, dx, dy, drawW, drawH);
             ctx.restore();
         }
 
         return canvas;
-    }
-
-    async extractValidationRaster(config, targetRes = 512) {
-        const canvas = await this.#renderCompositeCanvas(config, targetRes);
-        if (!canvas) return null;
-        return canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, targetRes, targetRes);
-    }
-
-    async exportToCanvas(config, targetRes) {
-        return await this.#renderCompositeCanvas(config, targetRes);
     }
 }
 
@@ -437,8 +526,10 @@ class UiController {
     #renderer;
     #dom;
     #state;
+    #config;
     #timers;
     #blobRegistry;
+    #boundRenderFrame;
 
     constructor(wasmKernel, gpuRenderer) {
         this.#kernel = wasmKernel;
@@ -450,11 +541,32 @@ class UiController {
             eccTier: 1,
             alignCount: 0,
             renderScheduled: false,
-            visualSize: 0
+            visualSize: 0,
+            logoBitmap: null
         };
 
-        this.#timers = { text: null, layout: null };
+        this.#config = {
+            dimension: 0,
+            alignCount: 0,
+            morphPayload: 2.0,
+            blendPayload: 0.5,
+            maskRadius: 0.0,
+            morphAnchor: 2.0,
+            payloadScale: 0.9,
+            quietZone: 2.0,
+            colorPayload: '#000000',
+            colorAnchor: '#000000',
+            colorBg: '#ffffff',
+            themePayload: 0,
+            themeAnchor: 0,
+            logoActive: false,
+            logoScaleVal: 0.0,
+            logoBitmap: null
+        };
+
+        this.#timers = { text: null };
         this.#blobRegistry = { logo: null, input: null };
+        this.#boundRenderFrame = this.#renderFrame.bind(this);
         
         this.#bindDomNodes();
         this.#attachListeners();
@@ -498,10 +610,6 @@ class UiController {
             logoOverlay: document.getElementById('logoOverlay'),
             removeLogoBtn: document.getElementById('remove-logo-btn')
         };
-
-        this.#dom.logoOverlay.classList.remove('transition-all', 'duration-200');
-        this.#dom.logoOverlay.style.transition = 'none';
-        this.#dom.logoOverlay.style.willChange = 'transform';
     }
 
     #attachListeners() {
@@ -530,9 +638,7 @@ class UiController {
             this.#requestRender();
         });
 
-        this.#dom.mask.addEventListener('change', () => {
-            this.#debounceEccValidation();
-        });
+        this.#dom.mask.addEventListener('change', () => this.#evaluateEccState());
 
         this.#dom.logoScale.addEventListener('input', (e) => {
             syncLayoutParams('logoScale', parseFloat(e.target.value));
@@ -540,9 +646,7 @@ class UiController {
             this.#requestRender();
         });
 
-        this.#dom.logoScale.addEventListener('change', () => {
-            this.#debounceEccValidation();
-        });
+        this.#dom.logoScale.addEventListener('change', () => this.#evaluateEccState());
 
         ['morphPayload', 'morphAnchor', 'blendPayload', 'scalePayload', 'quietZone'].forEach(param => {
             this.#dom[param].addEventListener('input', (e) => {
@@ -563,20 +667,25 @@ class UiController {
             this.#dom[param].addEventListener('change', () => this.#requestRender());
         });
 
-        this.#dom.logoInput.addEventListener('change', (e) => {
+        this.#dom.logoInput.addEventListener('change', async (e) => {
             if (!e.target.files.length) return;
             this.#revokeBlob('logo');
             
-            this.#blobRegistry.logo = URL.createObjectURL(e.target.files[0]);
+            const file = e.target.files[0];
+            this.#blobRegistry.logo = URL.createObjectURL(file);
             this.#dom.logoOverlay.src = this.#blobRegistry.logo;
             this.#dom.logoOverlay.setAttribute('data-active', 'true');
+            
+            // World-Class Decode Caching: Executed once here, entirely bypassing validation pipeline sync-locking
+            if (this.#state.logoBitmap) this.#state.logoBitmap.close();
+            this.#state.logoBitmap = await createImageBitmap(file);
             
             if (parseFloat(this.#dom.logoScale.value) === 0.0) {
                 this.#dom.logoScale.value = 0.15;
                 syncLayoutParams('logoScale', 0.15);
             }
             this.#updateLogoScaleTransformation();
-            this.#debounceEccValidation();
+            this.#evaluateEccState();
             this.#requestRender();
         });
 
@@ -586,9 +695,14 @@ class UiController {
             this.#dom.logoOverlay.removeAttribute('data-active');
             this.#dom.logoInput.value = "";
             
+            if (this.#state.logoBitmap) {
+                this.#state.logoBitmap.close();
+                this.#state.logoBitmap = null;
+            }
+            
             this.#updateLogoScaleTransformation();
             this.#requestRender();
-            this.#debounceEccValidation();
+            this.#evaluateEccState();
         });
 
         this.#dom.fileInput.addEventListener('change', (e) => {
@@ -661,14 +775,11 @@ class UiController {
         return 3;
     }
 
-    #debounceEccValidation() {
-        clearTimeout(this.#timers.layout);
-        this.#timers.layout = setTimeout(() => {
-            const requiredEcc = this.#calculateOptimalEcc();
-            if (requiredEcc !== this.#state.eccTier && this.#dom.dataEditor.value.trim()) {
-                this.#processTextIngestion(this.#dom.dataEditor.value, requiredEcc);
-            }
-        }, 150);
+    #evaluateEccState() {
+        const requiredEcc = this.#calculateOptimalEcc();
+        if (requiredEcc !== this.#state.eccTier && this.#dom.dataEditor.value.trim()) {
+            this.#processTextIngestion(this.#dom.dataEditor.value, requiredEcc);
+        }
     }
 
     #updateLogoScaleTransformation() {
@@ -723,7 +834,8 @@ class UiController {
         this.#state.version = (qrState.dimension - 21) / 4 + 1;
         this.#state.alignCount = qrState.alignmentCenters.length;
         
-        this.#renderer.bindMatrixData(qrState.semanticPayload, qrState.alignmentCenters);
+        // Exact element dispatch prevents buffer over-reads in WebGPU bounds checking
+        this.#renderer.bindMatrixData(qrState.semanticPayload, qrState.dimension, qrState.alignmentCenters);
         
         this.#updateTelemetry(textLength);
         this.#updateLogoScaleTransformation();
@@ -775,6 +887,7 @@ class UiController {
         this.#dom.ingestion.height = h;
         const ctx = this.#dom.ingestion.getContext('2d', { willReadFrequently: true });
         ctx.drawImage(bitmap, 0, 0, w, h);
+        bitmap.close(); 
         
         this.#state.eccTier = 3; 
         const result = this.#kernel.transpileImage(ctx.getImageData(0, 0, w, h), w, h);
@@ -791,35 +904,36 @@ class UiController {
         }
     }
 
-    #getCurrentConfig() {
-        return {
-            dimension: this.#state.dimension,
-            alignCount: this.#state.alignCount,
-            morphPayload: parseFloat(this.#dom.morphPayload.value),
-            blendPayload: parseFloat(this.#dom.blendPayload.value),
-            maskRadius: parseFloat(this.#dom.mask.value),
-            morphAnchor: parseFloat(this.#dom.morphAnchor.value),
-            payloadScale: parseFloat(this.#dom.scalePayload.value),
-            quietZone: parseFloat(this.#dom.quietZone.value),
-            colorPayload: this.#dom.colorPayload.value,
-            colorAnchor: this.#dom.colorAnchor.value,
-            colorBg: this.#dom.colorBg.value,
-            themePayload: parseInt(this.#dom.themePayload.value),
-            themeAnchor: parseInt(this.#dom.themeAnchor.value),
-            logoBlob: this.#blobRegistry.logo,
-            logoActive: this.#dom.logoOverlay.getAttribute('data-active') === 'true',
-            logoScaleVal: parseFloat(this.#dom.logoScale.value)
-        };
+    #updateConfigState() {
+        this.#config.dimension = this.#state.dimension;
+        this.#config.alignCount = this.#state.alignCount;
+        this.#config.morphPayload = parseFloat(this.#dom.morphPayload.value);
+        this.#config.blendPayload = parseFloat(this.#dom.blendPayload.value);
+        this.#config.maskRadius = parseFloat(this.#dom.mask.value);
+        this.#config.morphAnchor = parseFloat(this.#dom.morphAnchor.value);
+        this.#config.payloadScale = parseFloat(this.#dom.scalePayload.value);
+        this.#config.quietZone = parseFloat(this.#dom.quietZone.value);
+        this.#config.colorPayload = this.#dom.colorPayload.value;
+        this.#config.colorAnchor = this.#dom.colorAnchor.value;
+        this.#config.colorBg = this.#dom.colorBg.value;
+        this.#config.themePayload = parseInt(this.#dom.themePayload.value);
+        this.#config.themeAnchor = parseInt(this.#dom.themeAnchor.value);
+        this.#config.logoActive = this.#dom.logoOverlay.getAttribute('data-active') === 'true';
+        this.#config.logoScaleVal = parseFloat(this.#dom.logoScale.value);
+        this.#config.logoBitmap = this.#state.logoBitmap;
+    }
+
+    #renderFrame() {
+        this.#renderer.render(this.#config);
+        this.#state.renderScheduled = false;
     }
 
     #requestRender() {
         this.#invalidateValidation();
+        this.#updateConfigState();
         if (!this.#state.renderScheduled && this.#state.dimension > 0) {
             this.#state.renderScheduled = true;
-            requestAnimationFrame(() => {
-                this.#renderer.render(this.#getCurrentConfig());
-                this.#state.renderScheduled = false;
-            });
+            requestAnimationFrame(this.#boundRenderFrame);
         }
     }
 
@@ -831,11 +945,14 @@ class UiController {
         this.#dom.validateBtn.innerHTML = `<i data-lucide="loader" class="w-4 h-4 animate-spin"></i> Validating...`;
         lucide.createIcons();
 
+        await new Promise(resolve => requestAnimationFrame(resolve));
+
         try {
-            const imgData = await this.#renderer.extractValidationRaster(this.#getCurrentConfig(), 512);
+            this.#updateConfigState();
+            const imgData = await this.#renderer.extractValidationRaster(this.#config);
             if (!imgData) throw new Error("VRAM Extraction Failed");
 
-            const decodedText = this.#kernel.validateImage(imgData, 512, 512);
+            const decodedText = this.#kernel.validateImage(imgData, 1024, 1024);
 
             if (decodedText === text) {
                 this.#dom.validationStatus.textContent = "Optical Integrity: Verified";
@@ -860,15 +977,29 @@ class UiController {
         this.#dom.downloadBtn.disabled = true;
         lucide.createIcons();
 
+        await new Promise(resolve => requestAnimationFrame(resolve));
+
         try {
             const TARGET_RES = 3840;
-            const baseCanvas = await this.#renderer.exportToCanvas(this.#getCurrentConfig(), TARGET_RES);
+            this.#updateConfigState();
+            const baseCanvas = await this.#renderer.exportToCanvas(this.#config, TARGET_RES);
             if (!baseCanvas) throw new Error("VRAM Mapping Pipeline Failed");
 
+            let blob;
+            if (baseCanvas instanceof OffscreenCanvas) {
+                blob = await baseCanvas.convertToBlob({ type: "image/png", quality: 1.0 });
+            } else {
+                const dataUrl = baseCanvas.toDataURL("image/png", 1.0);
+                blob = await (await fetch(dataUrl)).blob();
+            }
+
+            const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.download = `QR-Export-${Date.now()}.png`;
-            link.href = baseCanvas.toDataURL("image/png", 1.0);
+            link.href = url;
             link.click();
+            
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
             
         } catch (e) {
             this.#dom.errorMessage.textContent = "4K Export Failed: " + e.message;
