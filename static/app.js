@@ -42,13 +42,12 @@ class WasmKernel {
         img: { ptr: 0, size: 0 }
     };
 
-    // Pre-allocated semantic matrix prevents JS TypedArray GC thrashing
     #semanticBuffer;
 
     constructor() {
         this.#encoder = new TextEncoder();
         this.#decoder = new TextDecoder();
-        this.#semanticBuffer = new Uint32Array(177 * 177); // Maximum V40 capacity
+        this.#semanticBuffer = new Uint32Array(177 * 177); 
     }
 
     async initialize() {
@@ -82,6 +81,16 @@ class WasmKernel {
         }
     }
 
+    #extractLuminance(rgbaData) {
+        const size = rgbaData.length / 4;
+        const luma = new Uint8Array(size);
+        for(let i = 0; i < size; i++) {
+            const idx = i << 2;
+            luma[i] = (rgbaData[idx] * 54 + rgbaData[idx+1] * 183 + rgbaData[idx+2] * 19) >> 8;
+        }
+        return luma;
+    }
+
     generateFromText(text, eccTier) {
         const bytes = this.#encoder.encode(text);
         const ptr = this.#getPtr('text', bytes.length);
@@ -93,31 +102,39 @@ class WasmKernel {
     }
 
     transpileImage(imgData, w, h) {
-        const size = imgData.data.length;
-        const ptr = this.#getPtr('img', size);
-        new Uint8Array(this.#exports.memory.buffer, ptr, size).set(imgData.data);
+        const luma = this.#extractLuminance(imgData.data);
+        const ptr = this.#getPtr('img', luma.length);
+        new Uint8Array(this.#exports.memory.buffer, ptr, luma.length).set(luma);
         
-        const code = this.#exports.transpile_qr(this.#ctxPtr, ptr, w, h);
-        if (code !== 1) return null;
+        let code = this.#exports.transpile_qr(this.#ctxPtr, ptr, w, h, 0);
+        if (code !== 1) code = this.#exports.transpile_qr(this.#ctxPtr, ptr, w, h, 1);
+        
+        const errorState = this.#exports.get_error_state(this.#ctxPtr);
+        if (code !== 1) return { valid: false, errorState };
         
         const textPtr = this.#exports.get_decoded_text_ptr(this.#ctxPtr);
         const textLen = this.#exports.get_decoded_text_len(this.#ctxPtr);
         const decodedText = this.#decoder.decode(new Uint8Array(this.#exports.memory.buffer, textPtr, textLen));
         
-        return { text: decodedText, ...this.#extractState() };
+        return { valid: true, text: decodedText, errorState, ...this.#extractState() };
     }
 
     validateImage(imgData, w, h) {
-        const size = imgData.data.length;
-        const ptr = this.#getPtr('img', size);
-        new Uint8Array(this.#exports.memory.buffer, ptr, size).set(imgData.data);
+        const luma = this.#extractLuminance(imgData.data);
+        const ptr = this.#getPtr('img', luma.length);
+        new Uint8Array(this.#exports.memory.buffer, ptr, luma.length).set(luma);
         
-        const code = this.#exports.validate_qr(this.#ctxPtr, ptr, w, h);
-        if (code !== 1) return null;
+        let code = this.#exports.validate_qr(this.#ctxPtr, ptr, w, h, 0);
+        if (code !== 1) code = this.#exports.validate_qr(this.#ctxPtr, ptr, w, h, 1);
+        
+        const errorState = this.#exports.get_error_state(this.#ctxPtr);
+        if (code !== 1) return { valid: false, errorState };
         
         const textPtr = this.#exports.get_decoded_text_ptr(this.#ctxPtr);
         const textLen = this.#exports.get_decoded_text_len(this.#ctxPtr);
-        return this.#decoder.decode(new Uint8Array(this.#exports.memory.buffer, textPtr, textLen));
+        const text = this.#decoder.decode(new Uint8Array(this.#exports.memory.buffer, textPtr, textLen));
+        
+        return { valid: true, text, errorState };
     }
 
     #extractState() {
@@ -159,7 +176,6 @@ class WasmKernel {
         const version = (dim - 21) / 4 + 1;
         const alignCenters = this.#computeAlignmentCenters(dim);
 
-        // Map into persistent buffer to bypass TypedArray allocations
         for (let i = 0; i < dim * dim; i++) {
             payload32[i] = raw8[i];
         }
@@ -216,20 +232,23 @@ class WasmKernel {
 class GpuRenderer {
     #device;
     #context;
+    
+    #computePipeline;
     #renderPipeline;
     
-    #buffers = { uniform: null, payload: null, align: null };
-    #bindGroup = null;
+    #buffers = { uniform: null, payload: null, align: null, voronoi: null };
+    
+    // Strict isolation of bindings resolving the Synchronization Scope crash
+    #bindGroupCompute = null;
+    #bindGroupRender = null;
 
     #uniformData;
     #uniformU32;
     #uniformF32;
 
-    // Twin-Canvas Architecture: Isolates Context Extrusions
     #valCanvas;
     #valCtx;
 
-    // Validation Cache
     #valTexture;
     #valReadBuffer;
     #valBytesPerRow;
@@ -240,7 +259,6 @@ class GpuRenderer {
         this.#uniformU32 = new Uint32Array(this.#uniformData);
         this.#uniformF32 = new Float32Array(this.#uniformData);
 
-        // Immutable context for non-blocking Read-After-Write loops
         this.#valCanvas = ('OffscreenCanvas' in window) 
             ? new OffscreenCanvas(1024, 1024) 
             : document.createElement('canvas');
@@ -265,6 +283,12 @@ class GpuRenderer {
         const shaderCode = await (await fetch('engine.wgsl')).text();
         const shaderModule = this.#device.createShaderModule({ code: shaderCode });
         
+        // AST Inference: We allow WebGPU to build the layouts natively from the shader entry points
+        this.#computePipeline = await this.#device.createComputePipelineAsync({
+            layout: 'auto',
+            compute: { module: shaderModule, entryPoint: 'cs_voronoi' }
+        });
+        
         this.#renderPipeline = await this.#device.createRenderPipelineAsync({
             layout: 'auto',
             vertex: { module: shaderModule, entryPoint: 'vs_main' },
@@ -279,13 +303,28 @@ class GpuRenderer {
         this.#buffers.payload = this.#device.createBuffer({ size: 262144, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         this.#buffers.align = this.#device.createBuffer({ size: 4096, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
         this.#buffers.uniform = this.#device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        this.#buffers.voronoi = this.#device.createBuffer({ size: 262144, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
 
-        this.#bindGroup = this.#device.createBindGroup({
+        // Hermetic Compute BindGroup: Accesses ONLY the AST-inferred dependencies for cs_voronoi
+        // Notice Binding 0 (payload) is purposefully absent, as it is dead code in the compute stage.
+        this.#bindGroupCompute = this.#device.createBindGroup({
+            layout: this.#computePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 1, resource: { buffer: this.#buffers.uniform } },
+                { binding: 2, resource: { buffer: this.#buffers.align } },
+                { binding: 3, resource: { buffer: this.#buffers.voronoi } }
+            ]
+        });
+
+        // Hermetic Render BindGroup: Accesses ONLY the AST-inferred dependencies for fs_main
+        // Notice Binding 3 (read_write) is absent, strictly honoring Fragment read-only safety.
+        this.#bindGroupRender = this.#device.createBindGroup({
             layout: this.#renderPipeline.getBindGroupLayout(0),
             entries: [
                 { binding: 0, resource: { buffer: this.#buffers.payload } },
                 { binding: 1, resource: { buffer: this.#buffers.uniform } },
-                { binding: 2, resource: { buffer: this.#buffers.align } }
+                { binding: 2, resource: { buffer: this.#buffers.align } },
+                { binding: 4, resource: { buffer: this.#buffers.voronoi } }
             ]
         });
     }
@@ -302,7 +341,6 @@ class GpuRenderer {
     }
 
     bindMatrixData(semanticPayload, dim, alignmentCenters) {
-        // Precise byte-length streaming to avert redundant VRAM bandwidth usage
         this.#device.queue.writeBuffer(this.#buffers.payload, 0, semanticPayload.buffer, 0, dim * dim * 4);
 
         const alignData = new Float32Array(Math.max(2, alignmentCenters.length * 2));
@@ -332,10 +370,18 @@ class GpuRenderer {
     }
 
     async render(config) {
-        if (!this.#bindGroup) return;
+        if (!this.#bindGroupCompute || !this.#bindGroupRender) return;
         this.#updateUniforms(config);
 
         const encoder = this.#device.createCommandEncoder();
+        
+        const computePass = encoder.beginComputePass();
+        computePass.setPipeline(this.#computePipeline);
+        computePass.setBindGroup(0, this.#bindGroupCompute);
+        const workgroups = Math.ceil(config.dimension / 16.0);
+        computePass.dispatchWorkgroups(workgroups, workgroups, 1);
+        computePass.end();
+
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
                 view: this.#context.getCurrentTexture().createView(),
@@ -345,7 +391,7 @@ class GpuRenderer {
         });
 
         pass.setPipeline(this.#renderPipeline);
-        pass.setBindGroup(0, this.#bindGroup);
+        pass.setBindGroup(0, this.#bindGroupRender);
         pass.draw(3, 1, 0, 0);
         pass.end();
 
@@ -353,7 +399,7 @@ class GpuRenderer {
     }
 
     async #extractRaster(config, targetRes) {
-        if (!this.#bindGroup) return null;
+        if (!this.#bindGroupCompute || !this.#bindGroupRender) return null;
         this.#updateUniforms(config);
 
         const format = navigator.gpu.getPreferredCanvasFormat();
@@ -391,6 +437,14 @@ class GpuRenderer {
         }
 
         const encoder = this.#device.createCommandEncoder();
+
+        const computePass = encoder.beginComputePass();
+        computePass.setPipeline(this.#computePipeline);
+        computePass.setBindGroup(0, this.#bindGroupCompute);
+        const workgroups = Math.ceil(config.dimension / 16.0);
+        computePass.dispatchWorkgroups(workgroups, workgroups, 1);
+        computePass.end();
+
         const pass = encoder.beginRenderPass({
             colorAttachments: [{
                 view: texture.createView(),
@@ -400,7 +454,7 @@ class GpuRenderer {
         });
 
         pass.setPipeline(this.#renderPipeline);
-        pass.setBindGroup(0, this.#bindGroup);
+        pass.setBindGroup(0, this.#bindGroupRender);
         pass.draw(3, 1, 0, 0);
         pass.end();
 
@@ -676,7 +730,6 @@ class UiController {
             this.#dom.logoOverlay.src = this.#blobRegistry.logo;
             this.#dom.logoOverlay.setAttribute('data-active', 'true');
             
-            // World-Class Decode Caching: Executed once here, entirely bypassing validation pipeline sync-locking
             if (this.#state.logoBitmap) this.#state.logoBitmap.close();
             this.#state.logoBitmap = await createImageBitmap(file);
             
@@ -834,7 +887,6 @@ class UiController {
         this.#state.version = (qrState.dimension - 21) / 4 + 1;
         this.#state.alignCount = qrState.alignmentCenters.length;
         
-        // Exact element dispatch prevents buffer over-reads in WebGPU bounds checking
         this.#renderer.bindMatrixData(qrState.semanticPayload, qrState.dimension, qrState.alignmentCenters);
         
         this.#updateTelemetry(textLength);
@@ -892,13 +944,17 @@ class UiController {
         this.#state.eccTier = 3; 
         const result = this.#kernel.transpileImage(ctx.getImageData(0, 0, w, h), w, h);
         
-        if (result) {
+        if (result.valid) {
             this.#dom.dataEditor.value = result.text;
             this.#updateSemanticContext(result.text);
             this.#validateContrast();
             this.#activateRenderer(result, new TextEncoder().encode(result.text).length);
         } else {
-            this.#dom.errorMessage.textContent = "No valid QR field detected, or severe structural anomaly.";
+            let errStr = "No valid QR field detected, or severe structural anomaly.";
+            if (result.errorState === -4) errStr = "Data Integrity Checksum failed. Too much noise/distortion.";
+            if (result.errorState === -2 || result.errorState === -3) errStr = "Structural anchors not found. Please ensure proper contrast.";
+            
+            this.#dom.errorMessage.textContent = errStr;
             this.#dom.errorAlert.classList.remove('hidden');
             this.#invalidateValidation();
         }
@@ -952,14 +1008,22 @@ class UiController {
             const imgData = await this.#renderer.extractValidationRaster(this.#config);
             if (!imgData) throw new Error("VRAM Extraction Failed");
 
-            const decodedText = this.#kernel.validateImage(imgData, 1024, 1024);
+            const result = this.#kernel.validateImage(imgData, 1024, 1024);
 
-            if (decodedText === text) {
+            if (result.valid && result.text === text) {
                 this.#dom.validationStatus.textContent = "Optical Integrity: Verified";
                 this.#dom.validationStatus.className = "text-sm font-mono font-bold text-green-600";
             } else {
-                this.#dom.validationStatus.textContent = "Optical Integrity: Critical Failure (Distortion/Mask Limit)";
-                this.#dom.validationStatus.className = "text-sm font-mono font-bold text-red-600";
+                if (result.errorState === -4) {
+                    this.#dom.validationStatus.textContent = "Optical Integrity: Checksum Failure (Reduce Blend/Volumetrics)";
+                    this.#dom.validationStatus.className = "text-sm font-mono font-bold text-orange-500";
+                } else if (result.errorState === -2 || result.errorState === -3) {
+                    this.#dom.validationStatus.textContent = "Optical Integrity: Structural Failure (Check Morphology/Anchors)";
+                    this.#dom.validationStatus.className = "text-sm font-mono font-bold text-red-500";
+                } else {
+                    this.#dom.validationStatus.textContent = "Optical Integrity: Critical Failure (Mismatch)";
+                    this.#dom.validationStatus.className = "text-sm font-mono font-bold text-red-600";
+                }
             }
         } catch (e) {
             this.#dom.validationStatus.textContent = "Optical Integrity: Compute Error";

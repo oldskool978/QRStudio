@@ -26,8 +26,6 @@ TOOLCHAIN_FILE = sanitize_path(os.path.join(TOOLS_DIR, "wasi_toolchain.cmake"))
 
 ZLIB_DIR = sanitize_path(os.path.join(BIN_DIR, "zlib"))
 ZXING_DIR = sanitize_path(os.path.join(BIN_DIR, "zxing-cpp"))
-STB_DIR = sanitize_path(os.path.join(BIN_DIR, "stb"))
-DAWN_DIR = sanitize_path(os.path.join(BIN_DIR, "dawn"))
 
 SRC_WASM_DIR = sanitize_path(os.path.join(BASE_DIR, "src_wasm"))
 PAYLOAD_BUILD_DIR = sanitize_path(os.path.join(SRC_WASM_DIR, "build"))
@@ -115,14 +113,10 @@ def forge_universal_polyfill():
 
     stubs_cpp = os.path.join(POLYFILL_DIR, "wasi_abi_stubs.cpp")
     with open(stubs_cpp, "w") as f:
-        f.write("#include <cstddef>\nextern \"C\" {\nvoid* __cxa_allocate_exception(size_t s) { return nullptr; }\n"
-                "void __cxa_throw(void* a, void* b, void* c) { __builtin_trap(); }\n"
-                "void* __cxa_begin_catch(void* p) { return p; }\nvoid __cxa_end_catch(void) {}\n"
-                "void __gxx_personality_v0(void) {}\n"
+        f.write("#include <cstddef>\nextern \"C\" {\n"
                 "int mkstemp(char* tmpl) { return -1; }\n"
                 "int mkostemp(char* tmpl, int flags) { return -1; }\n"
-                "int setjmp(void* env) { return 0; }\n"
-                "void longjmp(void* env, int val) { __builtin_trap(); }\n}\n")
+                "}\n")
 
     stub_obj = os.path.join(POLYFILL_DIR, "wasi_abi_stubs.o")
     stub_lib = sanitize_path(os.path.join(SYSROOT_DIR, "lib", "wasm32-wasip1", "libwasi-polyfill.a"))
@@ -131,7 +125,7 @@ def forge_universal_polyfill():
     if os.path.exists(stub_obj): os.remove(stub_obj)
     
     os.makedirs(os.path.dirname(stub_lib), exist_ok=True)
-    subprocess.run([CLANGXX_EXE, "-c", "-O3", "-fno-exceptions", "--target=wasm32-wasip1", f"--sysroot={SYSROOT_DIR}", stubs_cpp, "-o", stub_obj], check=True)
+    subprocess.run([CLANGXX_EXE, "-c", "-O3", "-fwasm-exceptions", "--target=wasm32-wasip1", f"--sysroot={SYSROOT_DIR}", stubs_cpp, "-o", stub_obj], check=True)
     subprocess.run([LLVM_AR, "rcs", stub_lib, stub_obj], check=True)
 
 def forge_sysroot_and_runtime():

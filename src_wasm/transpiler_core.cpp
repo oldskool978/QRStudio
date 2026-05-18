@@ -1,10 +1,13 @@
-#include <ZXing/ZXingCpp.h>
+#include <ZXing/ReadBarcode.h>
 #include <ZXing/CreateBarcode.h>
+#include <ZXing/ReaderOptions.h>
+#include <ZXing/Barcode.h>
+#include <ZXing/Error.h>
+#include <ZXing/ImageView.h>
 #include <vector>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
-#include <stdexcept>
 #include <new>
 
 using namespace ZXing;
@@ -15,6 +18,7 @@ struct TranspilerContext {
     std::vector<uint8_t> matrix_buffer;
     std::string decoded_text;
     int matrix_dimension = 0;
+    int error_state = 0;
 };
 
 static int reconstruct_matrix(TranspilerContext* ctx, const std::string& text, const char* ec_level) {
@@ -33,8 +37,10 @@ static int reconstruct_matrix(TranspilerContext* ctx, const std::string& text, c
                 ctx->matrix_buffer[y * ctx->matrix_dimension + x] = (*matrix.data(x, y) == 0) ? 1 : 0;
             }
         }
+        ctx->error_state = 0;
         return 1; 
-    } catch (const std::exception&) {
+    } catch (...) {
+        ctx->error_state = -1;
         return -1; 
     }
 }
@@ -64,44 +70,79 @@ extern "C" {
         return ctx ? static_cast<int>(ctx->decoded_text.length()) : 0; 
     }
 
-    WASM_EXPORT(transpile_qr) int transpile_qr(TranspilerContext* ctx, uint8_t* img_buffer, int width, int height) {
-        if (!ctx || !img_buffer) return 0;
-
-        ImageView image{img_buffer, width, height, ImageFormat::RGBA};
-        
-        ReaderOptions read_opts = ReaderOptions()
-            .formats(BarcodeFormat::QRCode)
-            .tryHarder(true)
-            .tryInvert(true)
-            .tryDownscale(true)
-            .returnErrors(false);
-        
-        Barcode result = ReadBarcode(image, read_opts);
-        if (!result.isValid()) return 0;
-        
-        ctx->decoded_text = result.text();
-        
-        return reconstruct_matrix(ctx, ctx->decoded_text, "H");
+    WASM_EXPORT(get_error_state) int get_error_state(TranspilerContext* ctx) {
+        return ctx ? ctx->error_state : -1;
     }
 
-    WASM_EXPORT(validate_qr) int validate_qr(TranspilerContext* ctx, uint8_t* img_buffer, int width, int height) {
-        if (!ctx || !img_buffer) return 0;
+    WASM_EXPORT(transpile_qr) int transpile_qr(TranspilerContext* ctx, uint8_t* lum_buffer, int width, int height, int binarizer_mode) {
+        if (!ctx || !lum_buffer) return 0;
 
-        ImageView image{img_buffer, width, height, ImageFormat::RGBA};
+        ImageView image{lum_buffer, width, height, ImageFormat::Lum};
+        Binarizer bin = (binarizer_mode == 1) ? Binarizer::LocalAverage : Binarizer::GlobalHistogram;
         
         ReaderOptions read_opts = ReaderOptions()
             .formats(BarcodeFormat::QRCode)
             .tryHarder(true)
             .tryInvert(true)
             .tryDownscale(true)
-            .returnErrors(false);
+            .returnErrors(true)
+            .binarizer(bin);
         
         Barcode result = ReadBarcode(image, read_opts);
-        if (!result.isValid()) return 0;
         
-        ctx->decoded_text = result.text();
+        if (result.isValid()) {
+            ctx->decoded_text = result.text();
+            return reconstruct_matrix(ctx, ctx->decoded_text, "H");
+        }
+
+        if (result.error()) {
+            switch(result.error().type()) {
+                case Error::Type::Format: ctx->error_state = -3; break;
+                case Error::Type::Checksum: ctx->error_state = -4; break;
+                case Error::Type::Unsupported: ctx->error_state = -1; break;
+                default: ctx->error_state = -1; break;
+            }
+        } else {
+            ctx->error_state = -2; // Target not structurally found
+        }
         
-        return 1;
+        return 0;
+    }
+
+    WASM_EXPORT(validate_qr) int validate_qr(TranspilerContext* ctx, uint8_t* lum_buffer, int width, int height, int binarizer_mode) {
+        if (!ctx || !lum_buffer) return 0;
+
+        ImageView image{lum_buffer, width, height, ImageFormat::Lum};
+        Binarizer bin = (binarizer_mode == 1) ? Binarizer::LocalAverage : Binarizer::GlobalHistogram;
+        
+        ReaderOptions read_opts = ReaderOptions()
+            .formats(BarcodeFormat::QRCode)
+            .tryHarder(true)
+            .tryInvert(true)
+            .tryDownscale(true)
+            .returnErrors(true)
+            .binarizer(bin);
+        
+        Barcode result = ReadBarcode(image, read_opts);
+        
+        if (result.isValid()) {
+            ctx->decoded_text = result.text();
+            ctx->error_state = 0;
+            return 1;
+        }
+
+        if (result.error()) {
+            switch(result.error().type()) {
+                case Error::Type::Format: ctx->error_state = -3; break;
+                case Error::Type::Checksum: ctx->error_state = -4; break;
+                case Error::Type::Unsupported: ctx->error_state = -1; break;
+                default: ctx->error_state = -1; break;
+            }
+        } else {
+            ctx->error_state = -2; // Target not structurally found
+        }
+        
+        return 0;
     }
 
     WASM_EXPORT(generate_qr_dynamic) int generate_qr_dynamic(TranspilerContext* ctx, uint8_t* text_buffer, int length, int ecc_tier) {

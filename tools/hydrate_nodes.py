@@ -27,17 +27,14 @@ def hydrate_node(name, url, sparse_paths=None):
     print(f"[+] Hydrating Node: {name} (Bleeding Edge)")
     
     if sparse_paths:
-        # Blob-less sparse checkout for massive repositories (e.g., Dawn)
         run_cmd(["git", "clone", "--filter=blob:none", "--sparse", "--depth=1", url, target_dir])
         run_cmd(["git", "sparse-checkout", "set"] + sparse_paths, cwd=target_dir)
     else:
-        # Standard shallow clone
         run_cmd(["git", "clone", "--depth=1", url, target_dir])
 
 def main():
     os.makedirs(BIN_DIR, exist_ok=True)
     
-    # Check for Git availability
     try:
         subprocess.run(["git", "--version"], check=True, capture_output=True)
     except FileNotFoundError:
@@ -47,12 +44,6 @@ def main():
     # Core Decoding & Compression
     hydrate_node("zxing-cpp", "https://github.com/zxing-cpp/zxing-cpp.git")
     hydrate_node("zlib", "https://github.com/madler/zlib.git")
-    
-    # Image Ingestion (Header-only)
-    hydrate_node("stb", "https://github.com/nothings/stb.git")
-    
-    # WebGPU Header Abstraction (Sparse Checkout)
-    hydrate_node("dawn", "https://dawn.googlesource.com/dawn", sparse_paths=["include"])
 
     print("\n[SYSTEM] Hydration Protocol Complete. All nodes converged to upstream latest.")
 

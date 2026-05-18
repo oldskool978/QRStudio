@@ -25,11 +25,12 @@
         input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
         input[type="color"]::-webkit-color-swatch { border: 1px solid #cbd5e1; border-radius: 4px; }
 
-        /* Hermetic Overrides for Validation Pipeline */
         .bg-slate-800 { background-color: #1e293b !important; }
         .hover\:bg-slate-900:hover { background-color: #0f172a !important; }
         .text-emerald-600 { color: #059669 !important; }
         .text-green-600 { color: #16a34a !important; }
+        .text-orange-500 { color: #f97316 !important; }
+        .text-red-500 { color: #ef4444 !important; }
         .text-red-600 { color: #dc2626 !important; }
     </style>
 </head>
@@ -162,11 +163,12 @@
                                         <div class="flex items-center gap-2">
                                             <input type="color" id="paramColorPayload" value="#000000">
                                             <select id="paramThemePayload" class="bg-white border border-slate-200 text-slate-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full p-1 cursor-pointer shadow-sm">
-                                                <option value="0">Solid</option>
+                                                <option value="0">Solid Matte</option>
                                                 <option value="1">Camouflage</option>
                                                 <option value="2">Holographic</option>
                                                 <option value="3">Liquid Metal</option>
-                                                <option value="4">Fade Gradient</option>
+                                                <option value="4">Beveled Glass</option>
+                                                <option value="5">Neon Cyberpunk</option>
                                             </select>
                                         </div>
                                     </div>
@@ -188,11 +190,12 @@
                                         <div class="flex items-center gap-2">
                                             <input type="color" id="paramColorAnchor" value="#000000">
                                             <select id="paramThemeAnchor" class="bg-white border border-slate-200 text-slate-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full p-1 cursor-pointer shadow-sm">
-                                                <option value="0">Solid</option>
+                                                <option value="0">Solid Matte</option>
                                                 <option value="1">Camouflage</option>
                                                 <option value="2">Holographic</option>
                                                 <option value="3">Liquid Metal</option>
-                                                <option value="4">Fade Gradient</option>
+                                                <option value="4">Beveled Glass</option>
+                                                <option value="5">Neon Cyberpunk</option>
                                             </select>
                                         </div>
                                     </div>
@@ -245,17 +248,17 @@
                             </div>
 
                             <div class="w-full bg-slate-50 border border-slate-200 rounded-xl p-5 shadow-sm mt-4">
-                                <div class="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
-                                    <h3 class="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-2">
+                                <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 border-b border-slate-200 pb-2 gap-2">
+                                    <h3 class="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-2 shrink-0">
                                         <i data-lucide="shield-check" class="w-4 h-4 text-emerald-600"></i> Closed-Loop Validation
                                     </h3>
-                                    <span id="validation-status" class="text-xs font-mono font-medium text-slate-500">Optical Integrity: Unverified</span>
+                                    <span id="validation-status" class="text-xs font-mono font-medium text-slate-500 sm:text-right">Optical Integrity: Unverified</span>
                                 </div>
                                 <div class="flex flex-col sm:flex-row gap-3">
                                     <button id="validate-btn" class="flex-1 flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-900 text-white font-medium py-3 px-4 rounded-xl transition-all shadow-sm text-sm">
                                         <i data-lucide="check-circle" class="w-4 h-4"></i> Verify Integrity
                                     </button>
-                                    <button id="download-btn" class="flex-1 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-xl transition-all shadow-sm shadow-blue-200 disabled:opacity-50 disabled:cursor-not-allowed text-sm">
+                                    <button id="download-btn" class="flex-1 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-xl transition-all shadow-sm shadow-blue-200 text-sm">
                                         <i data-lucide="download" class="w-4 h-4"></i> Export 4K Composite
                                     </button>
                                 </div>

@@ -19,6 +19,51 @@ struct Config {
 @group(0) @binding(1) var<uniform> config: Config;
 @group(0) @binding(2) var<storage, read> align: array<vec2<f32>>;
 
+// Dual-Binding Alias: WebGPU prohibits read_write in the Fragment stage
+@group(0) @binding(3) var<storage, read_write> voronoi_rw: array<u32>;
+@group(0) @binding(4) var<storage, read> voronoi_r: array<u32>;
+
+// ==========================================
+// VORONOI PARTITION KERNEL (COMPUTE)
+// ==========================================
+@compute @workgroup_size(16, 16)
+fn cs_voronoi(@builtin(global_invocation_id) id: vec3<u32>) {
+    let dim = config.dimension;
+    if (id.x >= dim || id.y >= dim) { return; }
+    
+    let pos = vec2<f32>(f32(id.x) + 0.5, f32(id.y) + 0.5);
+    var bestDist = 999999.0;
+    var bestIdx = 999u;
+
+    let finders = array<vec2<f32>, 3>(
+        vec2<f32>(3.5), vec2<f32>(f32(dim) - 3.5, 3.5), vec2<f32>(3.5, f32(dim) - 3.5)
+    );
+    
+    for (var i = 0u; i < 3u; i++) {
+        let d = length(pos - finders[i]);
+        if (d < bestDist) { 
+            bestDist = d; 
+            bestIdx = i; 
+        }
+    }
+
+    let count = min(config.alignCount, 50u);
+    for (var i = 0u; i < count; i++) {
+        let cx = align[i].x + 0.5;
+        let cy = align[i].y + 0.5;
+        let d = length(pos - vec2<f32>(cx, cy));
+        if (d < bestDist) { 
+            bestDist = d; 
+            bestIdx = i + 3u; 
+        }
+    }
+    
+    voronoi_rw[id.y * dim + id.x] = bestIdx;
+}
+
+// ==========================================
+// VERTEX KERNEL
+// ==========================================
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -39,9 +84,8 @@ fn vs_main(@builtin(vertex_index) vertexIndex: u32) -> VertexOutput {
 }
 
 // ==========================================
-// ZERO-BANDING PROCEDURAL ENTROPY ENGINE
+// ZERO-BANDING PROCEDURAL NOISE
 // ==========================================
-// Dave Hoskins' Hash - AAA Standard for banding-free GPU noise
 fn hash21(p: vec2<f32>) -> f32 {
     var p3  = fract(vec3<f32>(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
@@ -51,7 +95,6 @@ fn hash21(p: vec2<f32>) -> f32 {
 fn noise(x: vec2<f32>) -> f32 {
     let i = floor(x);
     let f = fract(x);
-    // Quintic Hermite interpolation
     let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
     return mix(
         mix(hash21(i + vec2<f32>(0.0, 0.0)), hash21(i + vec2<f32>(1.0, 0.0)), u.x),
@@ -64,7 +107,6 @@ fn fbm(x: vec2<f32>) -> f32 {
     var v = 0.0;
     var a = 0.5;
     var shift = vec2<f32>(100.0);
-    // Rotational matrix to break grid alignment artifacts
     let rot = mat2x2<f32>(cos(0.5), sin(0.5), -sin(0.5), cos(0.5));
     var p = x;
     for (var i = 0u; i < 4u; i++) {
@@ -76,25 +118,22 @@ fn fbm(x: vec2<f32>) -> f32 {
 }
 
 // ==========================================
-// MATERIAL & THEME SHADERS
+// VOLUMETRIC MATERIAL ENGINE
 // ==========================================
-// Evaluation shifted to grid-space (qrPos) to adapt to module density
-fn applyTheme(baseColor: vec3<f32>, qrPos: vec2<f32>, theme: u32) -> vec3<f32> {
-    // Offset to bypass origin singularities
+fn applyTheme(baseColor: vec3<f32>, qrPos: vec2<f32>, normal: vec3<f32>, theme: u32) -> vec3<f32> {
     let p = qrPos + vec2<f32>(142.1, 89.3);
-
+    let lightDir = normalize(vec3<f32>(1.0, 1.0, 1.5)); 
+    let viewDir = vec3<f32>(0.0, 0.0, 1.0);
+    
     if (theme == 0u) {
-        return baseColor;
-        
-    } else if (theme == 1u) {
-        // Camouflage: Grid-Relative High-Frequency Noise
-        // Frequency bounded so features max out at ~3 modules wide. 
+        return baseColor; 
+    } 
+    else if (theme == 1u) {
         let n = fbm(p * 0.35);
-        let intensity = smoothstep(0.3, 0.7, n) * 0.22; // 22% max variance
+        let intensity = smoothstep(0.3, 0.7, n) * 0.22;
         return mix(baseColor, config.colorBg, intensity);
-        
-    } else if (theme == 2u) {
-        // Holographic Iridescence
+    } 
+    else if (theme == 2u) {
         let wave = sin(p.x * 0.15 + p.y * 0.15) * 0.5 + 0.5;
         let holoColor = vec3<f32>(
             sin(wave * 6.28 + 0.0) * 0.5 + 0.5,
@@ -102,25 +141,33 @@ fn applyTheme(baseColor: vec3<f32>, qrPos: vec2<f32>, theme: u32) -> vec3<f32> {
             sin(wave * 6.28 + 4.18) * 0.5 + 0.5
         );
         return mix(baseColor, holoColor, 0.35);
-        
-    } else if (theme == 3u) {
-        // Liquid Metal Specular
-        let n = fbm(p * 0.6); // Sharp frequency
-        let specular = pow(n, 4.0) * 0.45; // Tight highlights
-        return clamp(baseColor + vec3<f32>(specular), vec3<f32>(0.0), vec3<f32>(1.0));
-        
-    } else if (theme == 4u) {
-        // Linear Fade Gradient (Diagonal Matrix Space)
-        let dim = f32(config.dimension);
-        let grad = clamp((qrPos.x + qrPos.y) / (dim * 2.0), 0.0, 1.0);
-        return mix(baseColor, config.colorBg, grad * 0.30); // Max 30% fade
+    } 
+    else if (theme == 3u) {
+        let n = fbm(p * 0.6);
+        let diffuse = max(dot(normal, lightDir), 0.0);
+        let halfVector = normalize(lightDir + viewDir);
+        let specular = pow(max(dot(normal, halfVector), 0.0), 16.0) * 0.6;
+        let litColor = baseColor * (0.6 + 0.4 * diffuse);
+        return clamp(litColor + vec3<f32>(specular + (n * 0.1)), vec3<f32>(0.0), vec3<f32>(1.0));
+    } 
+    else if (theme == 4u) {
+        let diffuse = max(dot(normal, lightDir), 0.0);
+        let invNormal = normalize(vec3<f32>(-normal.x, -normal.y, normal.z));
+        let glassHighlight = pow(max(dot(invNormal, lightDir), 0.0), 32.0) * 0.8;
+        let glassBase = mix(baseColor, config.colorBg, 0.3);
+        return clamp((glassBase * (0.8 + 0.2 * diffuse)) + vec3<f32>(glassHighlight), vec3<f32>(0.0), vec3<f32>(1.0));
+    }
+    else if (theme == 5u) {
+        let edgeDist = clamp(-normal.z * 3.0, 0.0, 1.0); 
+        let coreColor = vec3<f32>(1.0, 1.0, 1.0); 
+        return mix(baseColor, coreColor, edgeDist * 0.6); 
     }
     
     return baseColor;
 }
 
 // ==========================================
-// SIGNED DISTANCE FIELDS (SDF)
+// SIGNED DISTANCE FIELDS
 // ==========================================
 fn sdRoundedBox(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
     let q = abs(p) - b + vec2<f32>(r);
@@ -152,67 +199,54 @@ fn getAlignmentSDF(p: vec2<f32>, morph: f32) -> f32 {
 }
 
 // ==========================================
-// RENDER PIPELINE
+// FRAGMENT KERNEL
 // ==========================================
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let dim = f32(config.dimension);
     let totalDim = dim + config.quietZone * 2.0;
-    
-    // Grid-Space Coordinate (qrPos maps exactly to module indices)
     let qrPos = in.uv * totalDim - vec2<f32>(config.quietZone);
 
-    // 1. HARDWARE MASKING (Void Layer)
-    let center = vec2<f32>(dim * 0.5);
-    if (config.maskRadius > 0.0) {
-        let distToCenter = length(qrPos - center);
-        if (distToCenter < (config.maskRadius * dim)) {
-            return vec4<f32>(config.colorBg, 1.0);
-        }
-    }
-
-    var finalColor = config.colorBg;
     var minSDF = 999.0;
     var isAnchorPixel = false;
 
-    // 2. EXPLICIT ANCHOR RECONSTRUCTION (Finders)
-    let finders = array<vec2<f32>, 3>(
-        vec2<f32>(3.5),
-        vec2<f32>(dim - 3.5, 3.5),
-        vec2<f32>(3.5, dim - 3.5)
-    );
-
-    for (var i = 0u; i < 3u; i++) {
-        let d = getAnchorSDF(qrPos - finders[i], config.morphAnchor);
-        if (d < minSDF) { minSDF = d; isAnchorPixel = true; }
+    let cx = clamp(i32(qrPos.x), 0, i32(dim) - 1);
+    let cy = clamp(i32(qrPos.y), 0, i32(dim) - 1);
+    
+    if (cx >= 0 && cx < i32(dim) && cy >= 0 && cy < i32(dim)) {
+        let vIdx = u32(cy) * config.dimension + u32(cx);
+        let nearestAnchorIdx = voronoi_r[vIdx]; // Read from Fragment Alias
+        
+        if (nearestAnchorIdx < 3u) {
+            let finders = array<vec2<f32>, 3>(
+                vec2<f32>(3.5), vec2<f32>(dim - 3.5, 3.5), vec2<f32>(3.5, dim - 3.5)
+            );
+            minSDF = getAnchorSDF(qrPos - finders[nearestAnchorIdx], config.morphAnchor);
+            isAnchorPixel = true;
+        } else if (nearestAnchorIdx < 999u) {
+            let aIdx = nearestAnchorIdx - 3u;
+            if (aIdx < config.alignCount) {
+                let center = align[aIdx] + vec2<f32>(0.5);
+                minSDF = getAlignmentSDF(qrPos - center, config.morphAnchor);
+                isAnchorPixel = true;
+            }
+        }
     }
 
-    // 3. EXPLICIT ALIGNMENT RECONSTRUCTION
-    let count = min(config.alignCount, 50u); 
-    for (var i = 0u; i < count; i++) {
-        let cx = align[i].x + 0.5;
-        let cy = align[i].y + 0.5;
-        let d = getAlignmentSDF(qrPos - vec2<f32>(cx, cy), config.morphAnchor);
-        if (d < minSDF) { minSDF = d; isAnchorPixel = true; }
-    }
-
-    // 4. PAYLOAD MORPHOLOGY (Fluid Blend)
     let cell = floor(qrPos);
     let local = fract(qrPos) - 0.5;
 
     if (minSDF > -0.5) {
         var payloadSDF = 999.0;
 
-        for (var dy = -1; dy <= 1; dy++) {
-            for (var dx = -1; dx <= 1; dx++) {
-                let cx = i32(cell.x) + dx;
-                let cy = i32(cell.y) + dy;
+        for (var dy = -2; dy <= 2; dy++) {
+            for (var dx = -2; dx <= 2; dx++) {
+                let ncx = i32(cell.x) + dx;
+                let ncy = i32(cell.y) + dy;
                 
-                if (cx >= 0 && cx < i32(dim) && cy >= 0 && cy < i32(dim)) {
-                    let idx = u32(cy) * config.dimension + u32(cx);
-                    let val = grid[idx];
-                    
-                    if (val > 0u) {
+                if (ncx >= 0 && ncx < i32(dim) && ncy >= 0 && ncy < i32(dim)) {
+                    let idx = u32(ncy) * config.dimension + u32(ncx);
+                    if (grid[idx] > 0u) {
                         let p = local - vec2<f32>(f32(dx), f32(dy));
                         
                         var d = 0.0;
@@ -242,21 +276,39 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // 5. ANTI-ALIASING & GRID-SPACE THEME INJECTION
+    // dpdx/dpdy are now safely executed because control flow is perfectly uniform for all quad fragments
+    let nx = dpdx(minSDF);
+    let ny = dpdy(minSDF);
+    let nz = fwidth(minSDF) * 2.0; 
+    let normal = normalize(vec3<f32>(nx, ny, max(nz, 0.001)));
+
+    var finalColor = config.colorBg;
     let fw = fwidth(qrPos.x) * 0.7071; 
+    
+    if (config.themePayload == 5u && minSDF > fw && minSDF < 1.5) {
+        let glowStrength = exp(-minSDF * 3.0) * 0.4;
+        finalColor = mix(config.colorBg, config.colorPayload, glowStrength);
+    }
     
     if (minSDF < fw) {
         let alpha = smoothstep(fw, -fw, minSDF);
         var color = vec3<f32>(0.0);
         
-        // Pass qrPos to applyTheme for resolution-independent texturing
         if (isAnchorPixel) {
-            color = applyTheme(config.colorAnchor, qrPos, config.themeAnchor);
+            color = applyTheme(config.colorAnchor, qrPos, normal, config.themeAnchor);
         } else {
-            color = applyTheme(config.colorPayload, qrPos, config.themePayload);
+            color = applyTheme(config.colorPayload, qrPos, normal, config.themePayload);
         }
 
-        finalColor = mix(config.colorBg, color, alpha);
+        finalColor = mix(finalColor, color, alpha);
+    }
+
+    // Deferred Mathematical Masking (Replaces the early branch return)
+    if (config.maskRadius > 0.0) {
+        let center = vec2<f32>(dim * 0.5);
+        if (length(qrPos - center) < (config.maskRadius * dim)) {
+            finalColor = config.colorBg;
+        }
     }
 
     return vec4<f32>(finalColor, 1.0);
