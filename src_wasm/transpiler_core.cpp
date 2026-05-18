@@ -22,7 +22,6 @@ struct TranspilerContext {
 };
 
 static int reconstruct_matrix(TranspilerContext* ctx, const std::string& text, const char* ec_level) {
-    // Supreme Fix: Aligning with zxing-cpp dynamic zint parameter serialization
     std::string config_payload = std::string("ecLevel=") + ec_level;
     CreatorOptions create_opts(BarcodeFormat::QRCode, config_payload); 
 
@@ -104,7 +103,7 @@ extern "C" {
                 default: ctx->error_state = -1; break;
             }
         } else {
-            ctx->error_state = -2; // Target not structurally found
+            ctx->error_state = -2;
         }
         
         return 0;
@@ -140,7 +139,7 @@ extern "C" {
                 default: ctx->error_state = -1; break;
             }
         } else {
-            ctx->error_state = -2; // Target not structurally found
+            ctx->error_state = -2;
         }
         
         return 0;
