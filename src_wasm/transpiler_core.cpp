@@ -22,8 +22,9 @@ struct TranspilerContext {
 };
 
 static int reconstruct_matrix(TranspilerContext* ctx, const std::string& text, const char* ec_level) {
-    std::string config_payload = std::string("margin=0, ecLevel=") + ec_level;
-    CreatorOptions create_opts(BarcodeFormat::QRCode, config_payload.c_str()); 
+    // Supreme Fix: Aligning with zxing-cpp dynamic zint parameter serialization
+    std::string config_payload = std::string("ecLevel=") + ec_level;
+    CreatorOptions create_opts(BarcodeFormat::QRCode, config_payload); 
 
     try {
         Barcode new_barcode = CreateBarcodeFromText(text, create_opts);

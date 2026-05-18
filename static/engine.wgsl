@@ -18,8 +18,6 @@ struct Config {
 @group(0) @binding(0) var<storage, read> grid: array<u32>;
 @group(0) @binding(1) var<uniform> config: Config;
 @group(0) @binding(2) var<storage, read> align: array<vec2<f32>>;
-
-// Dual-Binding Alias: WebGPU prohibits read_write in the Fragment stage
 @group(0) @binding(3) var<storage, read_write> voronoi_rw: array<u32>;
 @group(0) @binding(4) var<storage, read> voronoi_r: array<u32>;
 
@@ -210,12 +208,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var minSDF = 999.0;
     var isAnchorPixel = false;
 
-    let cx = clamp(i32(qrPos.x), 0, i32(dim) - 1);
-    let cy = clamp(i32(qrPos.y), 0, i32(dim) - 1);
+    // Supreme Fix: Guarantee bounds integrity preventing hardware Clamp panics
+    let max_dim = max(i32(dim) - 1, 0);
+    let cx = clamp(i32(qrPos.x), 0, max_dim);
+    let cy = clamp(i32(qrPos.y), 0, max_dim);
     
     if (cx >= 0 && cx < i32(dim) && cy >= 0 && cy < i32(dim)) {
         let vIdx = u32(cy) * config.dimension + u32(cx);
-        let nearestAnchorIdx = voronoi_r[vIdx]; // Read from Fragment Alias
+        let nearestAnchorIdx = voronoi_r[vIdx];
         
         if (nearestAnchorIdx < 3u) {
             let finders = array<vec2<f32>, 3>(
@@ -238,6 +238,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     if (minSDF > -0.5) {
         var payloadSDF = 999.0;
+        
+        // Absolute Supreme: Evaluate the uniform branch condition once outside the loop.
+        let isHardEdge = config.blendPayload <= 0.001;
 
         for (var dy = -2; dy <= 2; dy++) {
             for (var dx = -2; dx <= 2; dx++) {
@@ -262,8 +265,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
                         if (payloadSDF == 999.0) {
                             payloadSDF = d;
                         } else {
-                            let k = clamp(0.5 + 0.5 * (payloadSDF - d) / config.blendPayload, 0.0, 1.0);
-                            payloadSDF = mix(payloadSDF, d, k) - config.blendPayload * k * (1.0 - k);
+                            // Absolute Supreme: Uniform branch bypasses polynomial math entirely.
+                            // Zero warp divergence. Maximum ALU throughput.
+                            if (isHardEdge) {
+                                payloadSDF = min(payloadSDF, d);
+                            } else {
+                                let k = clamp(0.5 + 0.5 * (payloadSDF - d) / config.blendPayload, 0.0, 1.0);
+                                payloadSDF = mix(payloadSDF, d, k) - config.blendPayload * k * (1.0 - k);
+                            }
                         }
                     }
                 }
@@ -276,7 +285,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
-    // dpdx/dpdy are now safely executed because control flow is perfectly uniform for all quad fragments
     let nx = dpdx(minSDF);
     let ny = dpdy(minSDF);
     let nz = fwidth(minSDF) * 2.0; 
@@ -303,7 +311,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         finalColor = mix(finalColor, color, alpha);
     }
 
-    // Deferred Mathematical Masking (Replaces the early branch return)
     if (config.maskRadius > 0.0) {
         let center = vec2<f32>(dim * 0.5);
         if (length(qrPos - center) < (config.maskRadius * dim)) {
