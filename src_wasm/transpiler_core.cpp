@@ -84,6 +84,26 @@ extern "C" {
         return reconstruct_matrix(ctx, ctx->decoded_text, "H");
     }
 
+    WASM_EXPORT(validate_qr) int validate_qr(TranspilerContext* ctx, uint8_t* img_buffer, int width, int height) {
+        if (!ctx || !img_buffer) return 0;
+
+        ImageView image{img_buffer, width, height, ImageFormat::RGBA};
+        
+        ReaderOptions read_opts = ReaderOptions()
+            .formats(BarcodeFormat::QRCode)
+            .tryHarder(true)
+            .tryInvert(true)
+            .tryDownscale(true)
+            .returnErrors(false);
+        
+        Barcode result = ReadBarcode(image, read_opts);
+        if (!result.isValid()) return 0;
+        
+        ctx->decoded_text = result.text();
+        
+        return 1;
+    }
+
     WASM_EXPORT(generate_qr_dynamic) int generate_qr_dynamic(TranspilerContext* ctx, uint8_t* text_buffer, int length, int ecc_tier) {
         if (!ctx || !text_buffer) return 0;
 

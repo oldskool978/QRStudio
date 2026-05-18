@@ -24,11 +24,18 @@
         }
         input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
         input[type="color"]::-webkit-color-swatch { border: 1px solid #cbd5e1; border-radius: 4px; }
+
+        /* Hermetic Overrides for Validation Pipeline */
+        .bg-slate-800 { background-color: #1e293b !important; }
+        .hover\:bg-slate-900:hover { background-color: #0f172a !important; }
+        .text-emerald-600 { color: #059669 !important; }
+        .text-green-600 { color: #16a34a !important; }
+        .text-red-600 { color: #dc2626 !important; }
     </style>
 </head>
 <body class="bg-slate-50 min-h-screen font-sans text-slate-800 selection:bg-blue-200">
 
-    <header class="bg-white border-b border-slate-200 sticky top-0 z-10">
+    <header class="bg-white border-b border-slate-200 sticky top-0 z-10 shadow-sm">
         <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
             <div class="flex items-center gap-2">
                 <div class="bg-blue-600 p-2 rounded-lg text-white">
@@ -44,7 +51,7 @@
         <div id="error-alert" class="hidden mb-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-start gap-3 shadow-sm">
             <i data-lucide="alert-circle" class="w-5 h-5 flex-shrink-0 mt-0.5"></i>
             <div>
-                <h3 class="font-semibold text-sm">Transpilation Failure</h3>
+                <h3 class="font-semibold text-sm">System Exception</h3>
                 <p class="text-sm mt-1" id="error-message">Optical ingestion or matrix generation failed.</p>
             </div>
             <button onclick="document.getElementById('error-alert').classList.add('hidden')" class="ml-auto text-red-400 hover:text-red-600">
@@ -75,8 +82,8 @@
                         </div>
 
                         <div id="image-preview-container" class="hidden relative">
-                            <img id="image-preview" src="" alt="Uploaded QR Code" class="max-h-64 mx-auto rounded-lg shadow-sm">
-                            <div class="absolute inset-0 bg-white/50 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none">
+                            <img id="image-preview" src="" alt="Uploaded QR Code" class="max-h-64 mx-auto rounded-lg shadow-sm border border-slate-200">
+                            <div class="absolute inset-0 bg-white/50 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center pointer-events-none rounded-lg">
                                 <span class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm font-medium shadow-lg">Ingest New Payload</span>
                             </div>
                         </div>
@@ -107,11 +114,11 @@
 
                     <div class="flex flex-col gap-6 items-center sm:items-start">
                         
-                        <div class="flex-shrink-0 bg-slate-50 rounded-xl border border-slate-100 shadow-inner w-full flex items-center justify-center aspect-square max-h-96 relative overflow-hidden">
+                        <div class="flex-shrink-0 bg-white rounded-xl border border-slate-200 shadow-sm w-full flex items-center justify-center aspect-square max-h-96 relative overflow-hidden">
                             <canvas id="gpuCanvas" width="1024" height="1024" class="hidden w-full h-full object-contain absolute inset-0"></canvas>
                             <img id="logoOverlay" data-active="false" src="" class="hidden absolute inset-0 m-auto z-10 object-contain pointer-events-none transition-all duration-200">
                             
-                            <div id="output-placeholder" class="w-full h-full flex flex-col items-center justify-center text-slate-400 absolute inset-0">
+                            <div id="output-placeholder" class="w-full h-full flex flex-col items-center justify-center text-slate-400 absolute inset-0 bg-slate-50">
                                 <i data-lucide="boxes" class="w-12 h-12 opacity-50 mb-2"></i>
                                 <span class="text-xs font-mono">Awaiting Matrix Payload</span>
                             </div>
@@ -154,7 +161,7 @@
                                     <div class="flex flex-col justify-end pb-1">
                                         <div class="flex items-center gap-2">
                                             <input type="color" id="paramColorPayload" value="#000000">
-                                            <select id="paramThemePayload" class="bg-white border border-slate-200 text-slate-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full p-1 cursor-pointer">
+                                            <select id="paramThemePayload" class="bg-white border border-slate-200 text-slate-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full p-1 cursor-pointer shadow-sm">
                                                 <option value="0">Solid</option>
                                                 <option value="1">Camouflage</option>
                                                 <option value="2">Holographic</option>
@@ -180,7 +187,7 @@
                                     <div class="flex flex-col justify-end pb-1">
                                         <div class="flex items-center gap-2">
                                             <input type="color" id="paramColorAnchor" value="#000000">
-                                            <select id="paramThemeAnchor" class="bg-white border border-slate-200 text-slate-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full p-1 cursor-pointer">
+                                            <select id="paramThemeAnchor" class="bg-white border border-slate-200 text-slate-700 text-xs rounded-md focus:ring-blue-500 focus:border-blue-500 block w-full p-1 cursor-pointer shadow-sm">
                                                 <option value="0">Solid</option>
                                                 <option value="1">Camouflage</option>
                                                 <option value="2">Holographic</option>
@@ -225,22 +232,35 @@
                                     </div>
                                 </div>
                                 
-                                <div class="flex justify-end gap-2 mt-2 pt-2 border-t border-slate-100">
+                                <div class="flex justify-end gap-2 mt-2 pt-4 border-t border-slate-200">
                                     <button id="remove-logo-btn" class="hidden text-xs font-medium text-red-600 bg-red-50 hover:bg-red-100 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1 border border-red-100">
                                         <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
                                     </button>
                                     <input type="file" id="logo-input" accept="image/*" class="hidden">
-                                    <button onclick="document.getElementById('logo-input').click()" class="text-xs font-medium text-slate-700 bg-slate-200 hover:bg-slate-300 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">
+                                    <button onclick="document.getElementById('logo-input').click()" class="text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 shadow-sm px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">
                                         <i data-lucide="image-plus" class="w-3.5 h-3.5"></i> Brand Logo
                                     </button>
                                 </div>
 
                             </div>
 
-                            <button id="download-btn" class="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-xl transition-all shadow-sm shadow-blue-200 mt-2 disabled:opacity-50 disabled:cursor-not-allowed">
-                                <i data-lucide="download" class="w-4 h-4"></i>
-                                Export Lossless 4K Composite
-                            </button>
+                            <div class="w-full bg-slate-50 border border-slate-200 rounded-xl p-5 shadow-sm mt-4">
+                                <div class="flex items-center justify-between mb-4 border-b border-slate-200 pb-2">
+                                    <h3 class="text-xs font-bold text-slate-600 uppercase tracking-wider flex items-center gap-2">
+                                        <i data-lucide="shield-check" class="w-4 h-4 text-emerald-600"></i> Closed-Loop Validation
+                                    </h3>
+                                    <span id="validation-status" class="text-xs font-mono font-medium text-slate-500">Optical Integrity: Unverified</span>
+                                </div>
+                                <div class="flex flex-col sm:flex-row gap-3">
+                                    <button id="validate-btn" class="flex-1 flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-900 text-white font-medium py-3 px-4 rounded-xl transition-all shadow-sm text-sm">
+                                        <i data-lucide="check-circle" class="w-4 h-4"></i> Verify Integrity
+                                    </button>
+                                    <button id="download-btn" class="flex-1 flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded-xl transition-all shadow-sm shadow-blue-200 disabled:opacity-50 disabled:cursor-not-allowed text-sm">
+                                        <i data-lucide="download" class="w-4 h-4"></i> Export 4K Composite
+                                    </button>
+                                </div>
+                            </div>
+
                         </div>
                     </div>
                 </div>

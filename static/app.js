@@ -80,6 +80,20 @@ class WasmKernel {
         return { text: decodedText, ...this.#extractState() };
     }
 
+    validateImage(imgData, w, h) {
+        const ptr = this.#exports.allocate_buffer(imgData.data.length);
+        new Uint8Array(this.#exports.memory.buffer, ptr, imgData.data.length).set(imgData.data);
+        
+        const code = this.#exports.validate_qr(this.#ctxPtr, ptr, w, h);
+        this.#exports.free_buffer(ptr);
+        
+        if (code !== 1) return null;
+        
+        const textPtr = this.#exports.get_decoded_text_ptr(this.#ctxPtr);
+        const textLen = this.#exports.get_decoded_text_len(this.#ctxPtr);
+        return new TextDecoder().decode(new Uint8Array(this.#exports.memory.buffer, textPtr, textLen));
+    }
+
     #extractState() {
         const dimension = this.#exports.get_matrix_dimension(this.#ctxPtr);
         const matrixPtr = this.#exports.get_matrix_buffer(this.#ctxPtr);
@@ -277,7 +291,7 @@ class GpuRenderer {
         this.#device.queue.submit([encoder.finish()]);
     }
 
-    async exportToCanvas(config, targetRes) {
+    async #extractRaster(config, targetRes) {
         if (!this.#buffers.payload || !this.#buffers.align) return null;
         this.#ensureBindGroup();
         this.#updateUniforms(config);
@@ -321,18 +335,12 @@ class GpuRenderer {
         );
 
         this.#device.queue.submit([encoder.finish()]);
-        
         await this.#device.queue.onSubmittedWorkDone();
         
         await readBuffer.mapAsync(GPUMapMode.READ);
         const src = new Uint8Array(readBuffer.getMappedRange());
         
-        const outCanvas = document.createElement('canvas');
-        outCanvas.width = targetRes;
-        outCanvas.height = targetRes;
-        const ctx = outCanvas.getContext('2d', { alpha: false, willReadFrequently: false });
-        const imgData = ctx.createImageData(targetRes, targetRes);
-        
+        const imgData = new ImageData(targetRes, targetRes);
         const isBGRA = format.includes('bgra');
 
         for (let y = 0; y < targetRes; y++) {
@@ -359,8 +367,68 @@ class GpuRenderer {
         texture.destroy();
         readBuffer.destroy();
 
+        return imgData;
+    }
+
+    async #renderCompositeCanvas(config, targetRes) {
+        const imgData = await this.#extractRaster(config, targetRes);
+        if (!imgData) return null;
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetRes;
+        canvas.height = targetRes;
+        const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
         ctx.putImageData(imgData, 0, 0);
-        return outCanvas;
+
+        if (config.logoActive && config.logoBlob) {
+            const img = new Image();
+            await new Promise((resolve, reject) => {
+                img.onload = resolve;
+                img.onerror = () => reject(new Error("Failed to load logo payload."));
+                img.src = config.logoBlob;
+            });
+
+            const padding = config.quietZone * 2.0;
+            const domainFraction = (config.logoScaleVal * 2.0 * config.dimension) / (config.dimension + padding);
+            const logoBoxSize = domainFraction * targetRes;
+
+            ctx.save();
+            ctx.imageSmoothingEnabled = true;
+            ctx.imageSmoothingQuality = 'high';
+
+            const intrinsicWidth = img.naturalWidth || img.width || 300.0;
+            const intrinsicHeight = img.naturalHeight || img.height || 300.0;
+            const imgRatio = intrinsicWidth / intrinsicHeight;
+
+            let drawW = logoBoxSize;
+            let drawH = logoBoxSize;
+
+            if (imgRatio > 1.0) {
+                drawH = logoBoxSize / imgRatio;
+            } else if (imgRatio < 1.0) {
+                drawW = logoBoxSize * imgRatio;
+            }
+
+            drawW = Math.round(drawW);
+            drawH = Math.round(drawH);
+            const dx = Math.round((targetRes - drawW) / 2.0);
+            const dy = Math.round((targetRes - drawH) / 2.0);
+
+            ctx.drawImage(img, dx, dy, drawW, drawH);
+            ctx.restore();
+        }
+
+        return canvas;
+    }
+
+    async extractValidationRaster(config, targetRes = 512) {
+        const canvas = await this.#renderCompositeCanvas(config, targetRes);
+        if (!canvas) return null;
+        return canvas.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, targetRes, targetRes);
+    }
+
+    async exportToCanvas(config, targetRes) {
+        return await this.#renderCompositeCanvas(config, targetRes);
     }
 }
 
@@ -410,6 +478,8 @@ class UiController {
             gpuCanvas: document.getElementById('gpuCanvas'),
             placeholder: document.getElementById('output-placeholder'),
             ingestion: document.getElementById('ingestionCanvas'),
+            validateBtn: document.getElementById('validate-btn'),
+            validationStatus: document.getElementById('validation-status'),
             downloadBtn: document.getElementById('download-btn'),
             morphPayload: document.getElementById('paramMorphPayload'),
             morphAnchor: document.getElementById('paramMorphAnchor'),
@@ -458,6 +528,9 @@ class UiController {
         this.#dom.mask.addEventListener('input', (e) => {
             syncLayoutParams('mask', parseFloat(e.target.value));
             this.#requestRender();
+        });
+
+        this.#dom.mask.addEventListener('change', () => {
             this.#debounceEccValidation();
         });
 
@@ -465,6 +538,9 @@ class UiController {
             syncLayoutParams('logoScale', parseFloat(e.target.value));
             this.#updateLogoScaleTransformation();
             this.#requestRender();
+        });
+
+        this.#dom.logoScale.addEventListener('change', () => {
             this.#debounceEccValidation();
         });
 
@@ -478,7 +554,7 @@ class UiController {
 
         ['colorPayload', 'colorAnchor', 'colorBg'].forEach(param => {
             this.#dom[param].addEventListener('input', () => {
-                this.#validateOpticalIntegrity();
+                this.#validateContrast();
                 this.#requestRender();
             });
         });
@@ -501,6 +577,7 @@ class UiController {
             }
             this.#updateLogoScaleTransformation();
             this.#debounceEccValidation();
+            this.#requestRender();
         });
 
         this.#dom.removeLogoBtn.addEventListener('click', () => {
@@ -533,7 +610,13 @@ class UiController {
             if (e.dataTransfer.files.length) this.#processImageIngestion(e.dataTransfer.files[0]);
         });
 
-        this.#dom.downloadBtn.addEventListener('click', () => this.#executeExport());
+        if (this.#dom.validateBtn) {
+            this.#dom.validateBtn.addEventListener('click', () => this.#executeValidation());
+        }
+
+        if (this.#dom.downloadBtn) {
+            this.#dom.downloadBtn.addEventListener('click', () => this.#executeExport());
+        }
     }
 
     #revokeBlob(key) {
@@ -543,7 +626,7 @@ class UiController {
         }
     }
 
-    #validateOpticalIntegrity() {
+    #validateContrast() {
         const bg = this.#dom.colorBg.value;
         const pRatio = ColorScience.calculateContrastRatio(bg, this.#dom.colorPayload.value);
         const aRatio = ColorScience.calculateContrastRatio(bg, this.#dom.colorAnchor.value);
@@ -552,6 +635,13 @@ class UiController {
             this.#dom.contrastWarning.classList.remove('hidden');
         } else {
             this.#dom.contrastWarning.classList.add('hidden');
+        }
+    }
+
+    #invalidateValidation() {
+        if (this.#dom.validationStatus) {
+            this.#dom.validationStatus.textContent = "Optical Integrity: Unverified";
+            this.#dom.validationStatus.className = "text-sm font-mono font-medium text-gray-500";
         }
     }
 
@@ -644,6 +734,7 @@ class UiController {
         if (!text.trim()) {
             this.#dom.status.textContent = "System Ready";
             this.#dom.payloadBadge.classList.add('hidden');
+            this.#invalidateValidation();
             return;
         }
 
@@ -652,13 +743,14 @@ class UiController {
         
         if (qrState) {
             this.#updateSemanticContext(text);
-            this.#validateOpticalIntegrity();
+            this.#validateContrast();
             this.#activateRenderer(qrState, new TextEncoder().encode(text).length);
         } else {
             this.#dom.errorMessage.textContent = "Data overflow. Payload exceeds maximum capacity for current ECC tier.";
             this.#dom.errorAlert.classList.remove('hidden');
             this.#dom.status.textContent = "Encoding Failed";
             this.#dom.status.className = 'text-sm font-mono font-medium text-red-500';
+            this.#invalidateValidation();
         }
     }
 
@@ -690,11 +782,12 @@ class UiController {
         if (result) {
             this.#dom.dataEditor.value = result.text;
             this.#updateSemanticContext(result.text);
-            this.#validateOpticalIntegrity();
+            this.#validateContrast();
             this.#activateRenderer(result, new TextEncoder().encode(result.text).length);
         } else {
             this.#dom.errorMessage.textContent = "No valid QR field detected, or severe structural anomaly.";
             this.#dom.errorAlert.classList.remove('hidden');
+            this.#invalidateValidation();
         }
     }
 
@@ -712,17 +805,52 @@ class UiController {
             colorAnchor: this.#dom.colorAnchor.value,
             colorBg: this.#dom.colorBg.value,
             themePayload: parseInt(this.#dom.themePayload.value),
-            themeAnchor: parseInt(this.#dom.themeAnchor.value)
+            themeAnchor: parseInt(this.#dom.themeAnchor.value),
+            logoBlob: this.#blobRegistry.logo,
+            logoActive: this.#dom.logoOverlay.getAttribute('data-active') === 'true',
+            logoScaleVal: parseFloat(this.#dom.logoScale.value)
         };
     }
 
     #requestRender() {
+        this.#invalidateValidation();
         if (!this.#state.renderScheduled && this.#state.dimension > 0) {
             this.#state.renderScheduled = true;
             requestAnimationFrame(() => {
                 this.#renderer.render(this.#getCurrentConfig());
                 this.#state.renderScheduled = false;
             });
+        }
+    }
+
+    async #executeValidation() {
+        const text = this.#dom.dataEditor.value.trim();
+        if (!text || this.#state.dimension === 0) return;
+
+        this.#dom.validateBtn.disabled = true;
+        this.#dom.validateBtn.innerHTML = `<i data-lucide="loader" class="w-4 h-4 animate-spin"></i> Validating...`;
+        lucide.createIcons();
+
+        try {
+            const imgData = await this.#renderer.extractValidationRaster(this.#getCurrentConfig(), 512);
+            if (!imgData) throw new Error("VRAM Extraction Failed");
+
+            const decodedText = this.#kernel.validateImage(imgData, 512, 512);
+
+            if (decodedText === text) {
+                this.#dom.validationStatus.textContent = "Optical Integrity: Verified";
+                this.#dom.validationStatus.className = "text-sm font-mono font-bold text-green-600";
+            } else {
+                this.#dom.validationStatus.textContent = "Optical Integrity: Critical Failure (Distortion/Mask Limit)";
+                this.#dom.validationStatus.className = "text-sm font-mono font-bold text-red-600";
+            }
+        } catch (e) {
+            this.#dom.validationStatus.textContent = "Optical Integrity: Compute Error";
+            this.#dom.validationStatus.className = "text-sm font-mono font-bold text-red-600";
+        } finally {
+            this.#dom.validateBtn.disabled = false;
+            this.#dom.validateBtn.innerHTML = `<i data-lucide="check-circle" class="w-4 h-4"></i> Verify Integrity`;
+            lucide.createIcons();
         }
     }
 
@@ -734,51 +862,8 @@ class UiController {
 
         try {
             const TARGET_RES = 3840;
-            
             const baseCanvas = await this.#renderer.exportToCanvas(this.#getCurrentConfig(), TARGET_RES);
             if (!baseCanvas) throw new Error("VRAM Mapping Pipeline Failed");
-
-            const ctx2d = baseCanvas.getContext('2d');
-
-            if (this.#dom.logoOverlay.getAttribute('data-active') === 'true' && this.#blobRegistry.logo) {
-                const img = new Image();
-                
-                await new Promise((resolve, reject) => {
-                    img.onload = resolve;
-                    img.onerror = () => reject(new Error("Failed to load logo payload."));
-                    img.src = this.#blobRegistry.logo;
-                });
-                
-                const padding = parseFloat(this.#dom.quietZone.value) * 2.0;
-                const logoScaleVal = parseFloat(this.#dom.logoScale.value);
-                const domainFraction = (logoScaleVal * 2.0 * this.#state.dimension) / (this.#state.dimension + padding);
-                const logoBoxSize = domainFraction * TARGET_RES;
-                
-                ctx2d.save();
-                ctx2d.imageSmoothingEnabled = true;
-                ctx2d.imageSmoothingQuality = 'high';
-                
-                const intrinsicWidth = img.naturalWidth || img.width || 300.0;
-                const intrinsicHeight = img.naturalHeight || img.height || 300.0;
-                const imgRatio = intrinsicWidth / intrinsicHeight;
-                
-                let drawW = logoBoxSize;
-                let drawH = logoBoxSize;
-                
-                if (imgRatio > 1.0) {
-                    drawH = logoBoxSize / imgRatio;
-                } else if (imgRatio < 1.0) {
-                    drawW = logoBoxSize * imgRatio;
-                }
-
-                const dx = Math.round((TARGET_RES - drawW) / 2.0);
-                const dy = Math.round((TARGET_RES - drawH) / 2.0);
-                drawW = Math.round(drawW);
-                drawH = Math.round(drawH);
-                
-                ctx2d.drawImage(img, dx, dy, drawW, drawH);
-                ctx2d.restore();
-            }
 
             const link = document.createElement('a');
             link.download = `QR-Export-${Date.now()}.png`;
